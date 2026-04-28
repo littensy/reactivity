@@ -26,5 +26,5 @@ Install Rokit: https://github.com/rojo-rbx/rokit
 ```sh
 rokit install
 lute run test
-lute run benches/propagate # 85us (reactivity) vs 80us (Charm) for 10*10
+lute run benches/propagate # 79.5us (reactivity) vs 80us (Charm) for 10*10
 ```
