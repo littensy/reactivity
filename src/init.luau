@@ -1,11 +1,9 @@
 type ReactiveStatus = "clean" | "pending" | "dirty"
 
-type DependencyStatus = number
-
 type Subscriber = {
 	read deps: { DependencyNode },
-	depsUsed: { DependencyStatus }?,
-	lastStaleDep: number?,
+	staleDepsStart: number?,
+	staleDepsEnd: number?,
 }
 
 type Dependency = {
@@ -46,9 +44,6 @@ type ReactiveNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
 
 type Update<T> = ((current: T) -> T) | T
 type Setter<T> = (update: Update<T>) -> T
-
-local STALE: DependencyStatus = 0
-local USED: DependencyStatus = 1
 
 local queue: { EffectNode } = {}
 local queueLength = 0
@@ -137,17 +132,13 @@ end
 local function link(dep: DependencyNode, sub: SubscriberNode)
 	local depSubs = dep.subs
 	local subDeps = sub.deps
-	local lastStaleDep = sub.lastStaleDep
+	local staleDepsStart = sub.staleDepsStart
 
 	-- If the next stale dependency is the same as the new dependency, we can
 	-- skip linking and mark it as used.
-	if lastStaleDep then
-		local depsUsed = sub.depsUsed :: { DependencyStatus }
-		if depsUsed[lastStaleDep] == STALE and subDeps[lastStaleDep] == dep then
-			sub.lastStaleDep = lastStaleDep + 1
-			depsUsed[lastStaleDep] = USED
-			return
-		end
+	if staleDepsStart and subDeps[staleDepsStart] == dep then
+		sub.staleDepsStart = staleDepsStart + 1
+		return
 	end
 
 	table.insert(subDeps, dep)
@@ -178,15 +169,16 @@ end
 
 -- Remove any stale dependencies that were not reused during the current run.
 -- A dependency is stale if the link function did not mark it as used and
--- increment lastStaleDep to skip it.
+-- increment staleDepsStart to skip it.
 local function purgeStaleDeps(sub: SubscriberNode)
-	local lastStaleDep = sub.lastStaleDep
-	if lastStaleDep then
+	local staleDepsStart = sub.staleDepsStart
+	if staleDepsStart then
 		local subDeps = sub.deps
-		for index = #sub.depsUsed :: { DependencyStatus }, lastStaleDep, -1 do
+		for index = sub.staleDepsEnd :: number, staleDepsStart, -1 do
 			unlink(subDeps[index], sub, index)
 		end
-		sub.lastStaleDep = nil
+		sub.staleDepsStart = nil
+		sub.staleDepsEnd = nil
 	end
 end
 
@@ -194,8 +186,9 @@ end
 -- reverse order to avoid shifting indices when unlinking.
 local function clearDeps(sub: SubscriberNode)
 	local subDeps = sub.deps
-	if sub.lastStaleDep then
-		sub.lastStaleDep = nil
+	if sub.staleDepsStart then
+		sub.staleDepsStart = nil
+		sub.staleDepsEnd = nil
 	end
 	for index = #subDeps, 1, -1 do
 		unlink(subDeps[index], sub)
@@ -272,8 +265,8 @@ local function updateComputed(computed: ComputedNode): boolean
 	local oldValue = computed.value
 
 	computed.status = "clean"
-	computed.depsUsed = table.create(#computed.deps, STALE)
-	computed.lastStaleDep = 1
+	computed.staleDepsStart = 1
+	computed.staleDepsEnd = #computed.deps
 
 	local prevSub = setActiveSub(computed)
 	local success, newValue = pcall(computed.getter, oldValue)
@@ -351,8 +344,8 @@ local function run(effect: EffectNode)
 
 		effect.status = "clean"
 		effect.queued = false
-		effect.depsUsed = table.create(#effect.deps, STALE)
-		effect.lastStaleDep = 1
+		effect.staleDepsStart = 1
+		effect.staleDepsEnd = #effect.deps
 
 		local prevSub = setActiveSub(effect)
 		local success, cleanup = pcall(effect.callback)

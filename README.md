@@ -8,9 +8,9 @@ I wanted to learn more about [`alien-signals`](https://github.com/stackblitz/ali
 - Error handling in `flush()` runs all queued effects instead of stopping at the first error
 - Remove recursion checks for effects and computed signals
 
-This gets fairly close to Charm's performance, considering the changes made to improve readability!
+This matches Charm's performance, which I think is surprising considering the changes made to improve readability.
 
-Read more about alien-signals: [`alien-signals` Deep Dive](https://gist.github.com/johnsoncodehk/59e79a0cfa5bb3421b5d166a08e42f30)
+Read more about `alien-signals`: [`alien-signals` Deep Dive](https://gist.github.com/johnsoncodehk/59e79a0cfa5bb3421b5d166a08e42f30)
 
 ## Todo
 
