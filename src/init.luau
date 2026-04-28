@@ -1,59 +1,68 @@
-type Status = "clean" | "pending" | "dirty"
+type ReactiveStatus = "clean" | "pending" | "dirty"
 
-type SignalNode<T = any> = {
-	type: "signal",
+type DependencyStatus = number
+
+type Subscriber = {
+	read deps: { DependencyNode },
+	depsUsed: { DependencyStatus }?,
+	lastStaleDep: number?,
+}
+
+type Dependency = {
+	read subs: { SubscriberNode },
+}
+
+type SignalNode<T = any> = Dependency & {
+	read type: "signal",
 	status: "clean" | "dirty",
-	subs: { [number]: Subscriber, length: number },
 	currentValue: T,
 	pendingValue: T,
 }
 
-type EffectNode = {
-	type: "effect",
-	status: Status | "dead",
-	subs: { [number]: Subscriber, length: number },
-	deps: { [number]: Dependency, length: number },
+type EffectNode = Subscriber & Dependency & {
+	read type: "effect",
+	status: ReactiveStatus | "dead",
+	read callback: () -> ...(() -> ())?,
+	read cleanups: { () -> () },
 	queued: boolean,
-	callback: () -> ...(() -> ())?,
-	cleanups: { () -> () },
 }
 
-type ComputedNode<T = any> = {
-	type: "computed",
-	status: Status,
-	subs: { [number]: Subscriber, length: number },
-	deps: { [number]: Dependency, length: number },
-	getter: (T?) -> T,
+type ComputedNode<T = any> = Subscriber & Dependency & {
+	read type: "computed",
+	status: ReactiveStatus,
+	read getter: (T?) -> T,
 	value: T,
 }
 
-type EffectScopeNode = {
-	type: "effectScope",
-	status: Status,
-	subs: { [number]: Subscriber, length: number },
-	deps: { [number]: Dependency, length: number },
-	cleanups: { () -> () },
+type EffectScopeNode = Subscriber & Dependency & {
+	read type: "effectScope",
+	status: ReactiveStatus,
+	read cleanups: { () -> () },
 }
 
-type Subscriber = ComputedNode | EffectNode | EffectScopeNode
-type Dependency = SignalNode | ComputedNode | EffectNode | EffectScopeNode
+type SubscriberNode = ComputedNode | EffectNode | EffectScopeNode
+type DependencyNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
 type ReactiveNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
 
 type Update<T> = ((current: T) -> T) | T
 type Setter<T> = (update: Update<T>) -> T
 
+local STALE: DependencyStatus = 0
+local USED: DependencyStatus = 1
+
 local queue: { EffectNode } = {}
 local queueLength = 0
 local notifyIndex = 0
 local batchDepth = 0
-local activeSub: Subscriber?
-local unwatched: (sub: Subscriber) -> ()
+local activeSub: SubscriberNode?
 
-local function getActiveSub(): Subscriber?
+local unwatched: (sub: SubscriberNode) -> ()
+
+local function getActiveSub(): SubscriberNode?
 	return activeSub
 end
 
-local function setActiveSub(sub: Subscriber?): Subscriber?
+local function setActiveSub(sub: SubscriberNode?): SubscriberNode?
 	local prevSub = activeSub
 	activeSub = sub
 	return prevSub
@@ -93,10 +102,10 @@ local function queueEffect(effect: EffectNode)
 	end
 end
 
-local function shallowPropagateDirty(dep: Dependency)
-	local subs = dep.subs
-	for index = 1, subs.length do
-		local sub = subs[index]
+-- Mark immediate subscribers as dirty without checking their dependencies,
+-- used when a node is updated to cause all of its subscribers to be updated.
+local function shallowPropagateDirty(dep: DependencyNode)
+	for _, sub in dep.subs do
 		if sub.status == "pending" then
 			sub.status = "dirty"
 			if sub.type == "effect" then
@@ -106,10 +115,11 @@ local function shallowPropagateDirty(dep: Dependency)
 	end
 end
 
-local function propagatePending(dep: Dependency)
-	local subs = dep.subs
-	for index = 1, subs.length do
-		local sub = subs[index]
+-- Mark nested subscribers as pending and queue effect runs, used when a node
+-- receives an update but has not been accessed yet, so it may not be known if
+-- the update will cause a change.
+local function propagatePending(dep: DependencyNode)
+	for _, sub in dep.subs do
 		if sub.status == "clean" then
 			sub.status = "pending"
 			if sub.type == "computed" then
@@ -121,49 +131,74 @@ local function propagatePending(dep: Dependency)
 	end
 end
 
-local function link(dep: Dependency, sub: Subscriber)
-	sub.deps.length += 1
-	sub.deps[sub.deps.length] = dep
-	dep.subs.length += 1
-	dep.subs[dep.subs.length] = sub
+-- Link a dependency to a subscriber, so that the subscriber will be notified
+-- when the dependency updates. If the subscriber has stale dependencies from a
+-- previous run, it will attempt to reuse the existing dependency.
+local function link(dep: DependencyNode, sub: SubscriberNode)
+	local depSubs = dep.subs
+	local subDeps = sub.deps
+	local lastStaleDep = sub.lastStaleDep
+
+	-- If the next stale dependency is the same as the new dependency, we can
+	-- skip linking and mark it as used.
+	if lastStaleDep then
+		local depsUsed = sub.depsUsed :: { DependencyStatus }
+		if depsUsed[lastStaleDep] == STALE and subDeps[lastStaleDep] == dep then
+			sub.lastStaleDep = lastStaleDep + 1
+			depsUsed[lastStaleDep] = USED
+			return
+		end
+	end
+
+	table.insert(subDeps, dep)
+	table.insert(depSubs, sub)
 end
 
-local function unlink(dep: Dependency, sub: Subscriber, depIndex: number?)
+-- Unlink a dependency from a subscriber. If the dependency has no more
+-- subscribers after unlinking, it will be unwatched to release its resources.
+local function unlink(dep: DependencyNode, sub: SubscriberNode, depIndex: number?)
 	local depSubs = dep.subs
 	local subDeps = sub.deps
 
+	depIndex = depIndex or table.find(subDeps, dep)
+	if depIndex then
+		table.remove(subDeps, depIndex)
+	end
+
 	local subIndex = table.find(depSubs, sub)
 	if subIndex then
-		depSubs.length -= 1
 		table.remove(depSubs, subIndex)
 
 		-- Release nodes when they have no subscribers
-		if depSubs.length == 0 then
+		if not depSubs[1] then
 			unwatched(dep)
 		end
 	end
-
-	depIndex = depIndex or table.find(subDeps, dep)
-	if depIndex then
-		-- Dependency order does not matter, so we can do an O(1) removal by
-		-- swapping with the last element
-		subDeps[depIndex] = subDeps[subDeps.length]
-		subDeps[subDeps.length] = nil
-		subDeps.length -= 1
-	end
 end
 
-local function purgeStaleDeps(sub: Subscriber, staleMarker: number)
-	if staleMarker < sub.deps.length then
-		for index = staleMarker, 1, -1 do
-			unlink(sub.deps[index], sub, index)
+-- Remove any stale dependencies that were not reused during the current run.
+-- A dependency is stale if the link function did not mark it as used and
+-- increment lastStaleDep to skip it.
+local function purgeStaleDeps(sub: SubscriberNode)
+	local lastStaleDep = sub.lastStaleDep
+	if lastStaleDep then
+		local subDeps = sub.deps
+		for index = #sub.depsUsed :: { DependencyStatus }, lastStaleDep, -1 do
+			unlink(subDeps[index], sub, index)
 		end
+		sub.lastStaleDep = nil
 	end
 end
 
-local function clearDeps(sub: Subscriber)
-	for index = sub.deps.length, 1, -1 do
-		unlink(sub.deps[index], sub, index)
+-- Clear all dependencies from a subscriber. Dependencies are removed in
+-- reverse order to avoid shifting indices when unlinking.
+local function clearDeps(sub: SubscriberNode)
+	local subDeps = sub.deps
+	if sub.lastStaleDep then
+		sub.lastStaleDep = nil
+	end
+	for index = #subDeps, 1, -1 do
+		unlink(subDeps[index], sub)
 	end
 end
 
@@ -235,15 +270,16 @@ end
 
 local function updateComputed(computed: ComputedNode): boolean
 	local oldValue = computed.value
-	local staleMarker = computed.deps.length
 
 	computed.status = "clean"
+	computed.depsUsed = table.create(#computed.deps, STALE)
+	computed.lastStaleDep = 1
 
 	local prevSub = setActiveSub(computed)
 	local success, newValue = pcall(computed.getter, oldValue)
 	activeSub = prevSub
 
-	purgeStaleDeps(computed, staleMarker)
+	purgeStaleDeps(computed)
 
 	if success then
 		computed.value = newValue
@@ -272,10 +308,8 @@ local function updateNode(node: SignalNode | ComputedNode): boolean
 	end
 end
 
-local function checkDirty(sub: Subscriber): boolean
-	local deps = sub.deps
-	for index = 1, deps.length do
-		local dep = deps[index]
+local function checkDirty(sub: SubscriberNode): boolean
+	for _, dep in sub.deps do
 		if sub.status == "dirty" then
 			-- The original node may have been indirectly marked dirty while
 			-- checking a dependency, so this is checked every iteration
@@ -315,10 +349,10 @@ local function run(effect: EffectNode)
 			return
 		end
 
-		local staleMarker = effect.deps.length
-
 		effect.status = "clean"
 		effect.queued = false
+		effect.depsUsed = table.create(#effect.deps, STALE)
+		effect.lastStaleDep = 1
 
 		local prevSub = setActiveSub(effect)
 		local success, cleanup = pcall(effect.callback)
@@ -326,13 +360,11 @@ local function run(effect: EffectNode)
 
 		-- Remove any dependencies that were not accessed during this run.
 		-- Child effects will lose their only subscriber and get unwatched.
-		purgeStaleDeps(effect, staleMarker)
+		purgeStaleDeps(effect)
 
-		if success then
-			if type(cleanup) == "function" then
-				table.insert(effect.cleanups, cleanup)
-			end
-		else
+		if success and type(cleanup) == "function" then
+			table.insert(effect.cleanups, cleanup)
+		elseif not success then
 			error(cleanup, 0)
 		end
 
@@ -394,7 +426,7 @@ local function signal<T>(initialValue: T): (...Update<T>) -> T
 	local node: SignalNode = {
 		type = "signal",
 		status = "clean",
-		subs = { length = 0 },
+		subs = {},
 		currentValue = initialValue,
 		pendingValue = initialValue,
 	}
@@ -453,8 +485,8 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 	local node: ComputedNode = {
 		type = "computed",
 		status = "clean",
-		deps = { length = 0 },
-		subs = { length = 0 },
+		deps = {},
+		subs = {},
 		getter = getter,
 	}
 	local initialized = false
@@ -498,8 +530,8 @@ local function effect(callback: () -> ...(() -> ())?): () -> ()
 	local node: EffectNode = {
 		type = "effect",
 		status = "clean",
-		deps = { length = 0 },
-		subs = { length = 0 },
+		deps = {},
+		subs = {},
 		queued = false,
 		callback = callback,
 		cleanups = {},
@@ -520,15 +552,14 @@ local function effect(callback: () -> ...(() -> ())?): () -> ()
 	local success, result = pcall(node.callback)
 	activeSub = prevSub
 
-	if success then
-		if type(result) == "function" then
-			table.insert(node.cleanups, result)
-		end
-		endBatch()
-	else
+	if success and type(result) == "function" then
+		table.insert(node.cleanups, result)
+	elseif not success then
 		endBatch()
 		error(result, 2)
 	end
+
+	endBatch()
 
 	return function()
 		stopEffect(node)
@@ -539,8 +570,8 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 	local node: EffectScopeNode = {
 		type = "effectScope",
 		status = "clean",
-		deps = { length = 0 },
-		subs = { length = 0 },
+		deps = {},
+		subs = {},
 		cleanups = {},
 	}
 
@@ -553,11 +584,9 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 	local success, result = pcall(callback)
 	activeSub = prevSub
 
-	if success then
-		if type(result) == "function" then
-			table.insert(node.cleanups, result)
-		end
-	else
+	if success and type(result) == "function" then
+		table.insert(node.cleanups, result)
+	elseif not success then
 		error(result, 2)
 	end
 
@@ -567,14 +596,13 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 end
 
 local function trigger(callback: () -> ...any)
-	local sub: ComputedNode = {
-		type = "computed",
-		status = "clean",
-		getter = function()
-			return nil
-		end,
-		deps = { length = 0 },
-		subs = { length = 0 },
+	local sub: EffectNode = {
+		type = "effect",
+		status = "dead",
+		deps = {},
+		subs = {},
+		queued = false,
+		callback = function() end,
 		cleanups = {},
 	}
 
@@ -602,9 +630,11 @@ local function untracked<Args..., Results...>(callback: (Args...) -> Results...,
 		local prevSub = setActiveSub(nil)
 		local results: { any } = { pcall(callback, ...) }
 		activeSub = prevSub
+
 		if not results[1] then
 			error(results[2], 2)
 		end
+
 		return unpack(results, 2)
 	else
 		return callback(...)
