@@ -1,4 +1,44 @@
-type ReactiveStatus = "clean" | "pending" | "dirty"
+-- Flags for tracking the state of reactive nodes and their types. These are
+-- typed as string literals for better type inference, but are actually numbers
+-- for better performance and memory.
+
+local CLEAN: "CLEAN" = 0 :: any -- Default state, no changes detected
+local DIRTY: "DIRTY" = 1 :: any -- Value is outdated and needs recomputation
+local PENDING: "PENDING" = 2 :: any -- Might be dirty, pending verification
+local DISPOSED: "DISPOSED" = 3 :: any -- Should be cleaned up and ignored
+
+local SIGNAL: "SIGNAL" = 0 :: any
+local COMPUTED: "COMPUTED" = 1 :: any
+local EFFECT: "EFFECT" = 2 :: any
+local EFFECT_SCOPE: "EFFECT_SCOPE" = 3 :: any
+
+type SignalNode<T = any> = Dependency & {
+	read type: typeof(SIGNAL),
+	status: typeof(CLEAN) | typeof(DIRTY),
+	currentValue: T,
+	pendingValue: T,
+}
+
+type ComputedNode<T = any> = Subscriber & Dependency & {
+	read type: typeof(COMPUTED),
+	status: typeof(CLEAN) | typeof(DIRTY) | typeof(PENDING),
+	read getter: (T?) -> T,
+	value: T,
+}
+
+type EffectNode = Subscriber & Dependency & {
+	read type: typeof(EFFECT),
+	status: typeof(CLEAN) | typeof(DIRTY) | typeof(PENDING) | typeof(DISPOSED),
+	read callback: () -> ...(() -> ())?,
+	read cleanups: { () -> () },
+	queued: boolean?,
+}
+
+type EffectScopeNode = Subscriber & Dependency & {
+	read type: typeof(EFFECT_SCOPE),
+	status: typeof(CLEAN) | typeof(DIRTY) | typeof(PENDING) | typeof(DISPOSED),
+	read cleanups: { () -> () },
+}
 
 type Subscriber = {
 	read deps: { DependencyNode },
@@ -10,40 +50,12 @@ type Dependency = {
 	read subs: { SubscriberNode },
 }
 
-type SignalNode<T = any> = Dependency & {
-	read type: "signal",
-	status: "clean" | "dirty",
-	currentValue: T,
-	pendingValue: T,
-}
-
-type EffectNode = Subscriber & Dependency & {
-	read type: "effect",
-	status: ReactiveStatus | "dead",
-	read callback: () -> ...(() -> ())?,
-	read cleanups: { () -> () },
-	queued: boolean,
-}
-
-type ComputedNode<T = any> = Subscriber & Dependency & {
-	read type: "computed",
-	status: ReactiveStatus,
-	read getter: (T?) -> T,
-	value: T,
-}
-
-type EffectScopeNode = Subscriber & Dependency & {
-	read type: "effectScope",
-	status: ReactiveStatus,
-	read cleanups: { () -> () },
-}
-
 type SubscriberNode = ComputedNode | EffectNode | EffectScopeNode
 type DependencyNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
 type ReactiveNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
 
-type Update<T> = ((current: T) -> T) | T
-type Setter<T> = (update: Update<T>) -> T
+export type Update<T> = ((current: T) -> T) | T
+export type Signal<T> = (...Update<T>) -> T
 
 local queue: { EffectNode } = {}
 local queueLength = 0
@@ -79,7 +91,7 @@ local function queueEffect(effect: EffectNode)
 
 		-- Traverse to the next parent if it exists and is not queued
 		local sub = effect.subs[1]
-		if sub and sub.type == "effect" and not sub.queued then
+		if sub and sub.type == EFFECT and not sub.queued then
 			effect = sub
 		else
 			break
@@ -101,9 +113,9 @@ end
 -- used when a node is updated to cause all of its subscribers to be updated.
 local function shallowPropagateDirty(dep: DependencyNode)
 	for _, sub in dep.subs do
-		if sub.status == "pending" then
-			sub.status = "dirty"
-			if sub.type == "effect" then
+		if sub.status == PENDING then
+			sub.status = DIRTY
+			if sub.type == EFFECT then
 				queueEffect(sub)
 			end
 		end
@@ -115,11 +127,11 @@ end
 -- the update will cause a change.
 local function propagatePending(dep: DependencyNode)
 	for _, sub in dep.subs do
-		if sub.status == "clean" then
-			sub.status = "pending"
-			if sub.type == "computed" then
+		if sub.status == CLEAN then
+			sub.status = PENDING
+			if sub.type == COMPUTED then
 				propagatePending(sub)
-			elseif sub.type == "effect" then
+			elseif sub.type == EFFECT then
 				queueEffect(sub)
 			end
 		end
@@ -197,7 +209,7 @@ end
 
 local function runCleanups(cleanups: { () -> () })
 	local errors: { string } = {}
-	local hasErrors = false
+	local failed = false
 
 	for index, cleanup in cleanups do
 		cleanups[index] = nil
@@ -207,19 +219,19 @@ local function runCleanups(cleanups: { () -> () })
 		activeSub = prevSub
 
 		if not success then
-			hasErrors = true
+			failed = true
 			table.insert(errors, tostring(err))
 		end
 	end
 
-	if hasErrors then
+	if failed then
 		error(`Errors occurred during effect cleanup:\n\n{table.concat(errors, "\n\n")}`, 0)
 	end
 end
 
 local function stopEffect(effect: EffectNode)
-	effect.status = "dead"
-	effect.queued = false
+	effect.status = DISPOSED
+	effect.queued = nil
 
 	-- Unlink from dependencies and child effects
 	clearDeps(effect)
@@ -247,16 +259,16 @@ local function stopEffectScope(effectScope: EffectScopeNode)
 end
 
 function unwatched(node: ReactiveNode)
-	if node.type == "effect" then
+	if node.type == EFFECT then
 		-- If an effect loses its only subscriber, its parent effect re-ran or
 		-- got disposed, so this child effect should be disposed as well
 		stopEffect(node)
-	elseif node.type == "effectScope" then
+	elseif node.type == EFFECT_SCOPE then
 		stopEffectScope(node)
-	elseif node.type == "computed" then
+	elseif node.type == COMPUTED then
 		-- Clearing a computed node's dependencies when it loses all of its
-		-- subscribers allows it to be garbage collected without weak tables
-		node.status = "dirty"
+		-- subscribers allows it to be garbage collected
+		node.status = DIRTY
 		clearDeps(node)
 	end
 end
@@ -264,7 +276,7 @@ end
 local function updateComputed(computed: ComputedNode): boolean
 	local oldValue = computed.value
 
-	computed.status = "clean"
+	computed.status = CLEAN
 	computed.staleDepsStart = 1
 	computed.staleDepsEnd = #computed.deps
 
@@ -284,7 +296,7 @@ end
 
 local function updateSignal(signal: SignalNode): boolean
 	local pendingValue = signal.pendingValue
-	signal.status = "clean"
+	signal.status = CLEAN
 	if signal.currentValue ~= pendingValue then
 		signal.currentValue = pendingValue
 		return true
@@ -294,7 +306,7 @@ local function updateSignal(signal: SignalNode): boolean
 end
 
 local function updateNode(node: SignalNode | ComputedNode): boolean
-	if node.type == "computed" then
+	if node.type == COMPUTED then
 		return updateComputed(node)
 	else
 		return updateSignal(node)
@@ -303,20 +315,20 @@ end
 
 local function checkDirty(sub: SubscriberNode): boolean
 	for _, dep in sub.deps do
-		if sub.status == "dirty" then
+		if sub.status == DIRTY then
 			-- The original node may have been indirectly marked dirty while
 			-- checking a dependency, so this is checked every iteration
 			return true
-		elseif dep.type == "computed" or dep.type == "signal" then
-			if dep.status == "dirty" then
+		elseif dep.type == COMPUTED or dep.type == SIGNAL then
+			if dep.status == DIRTY then
 				-- Mark immediate subscribers as dirty if an update occurs
 				if updateNode(dep) then
 					shallowPropagateDirty(dep)
 					return true
 				end
-			elseif dep.status == "pending" then
+			elseif dep.status == PENDING then
 				-- Check if the node has any dirty or pending dependencies that
-				-- would require it to be dirty as well
+				-- would cause it to be dirty as well
 				if checkDirty(dep) then
 					-- Mark immediate subscribers as dirty if an update occurs
 					if updateNode(dep) then
@@ -325,7 +337,7 @@ local function checkDirty(sub: SubscriberNode): boolean
 					end
 				else
 					-- The update resulted in no change and can be skipped
-					dep.status = "clean"
+					dep.status = CLEAN
 				end
 			end
 		end
@@ -334,16 +346,16 @@ local function checkDirty(sub: SubscriberNode): boolean
 end
 
 local function run(effect: EffectNode)
-	if effect.status == "dirty" or (effect.status == "pending" and checkDirty(effect)) then
+	if effect.status == DIRTY or (effect.status == PENDING and checkDirty(effect)) then
 		runCleanups(effect.cleanups)
 
 		-- Cancel the run if the effect was stopped during cleanup
-		if effect.status == "dead" then
+		if effect.status == DISPOSED then
 			return
 		end
 
-		effect.status = "clean"
-		effect.queued = false
+		effect.status = CLEAN
+		effect.queued = nil
 		effect.staleDepsStart = 1
 		effect.staleDepsEnd = #effect.deps
 
@@ -363,12 +375,12 @@ local function run(effect: EffectNode)
 
 		-- If the effect was disposed during its execution, run any cleanups
 		-- that might have been missed
-		if effect.status == "dead" then
+		if effect.status == DISPOSED then
 			runCleanups(effect.cleanups)
 		end
 	else
-		effect.status = "clean"
-		effect.queued = false
+		effect.status = CLEAN
+		effect.queued = nil
 	end
 end
 
@@ -380,20 +392,20 @@ local function flush()
 	end
 
 	local errors: { string } = {}
-	local didError = false
+	local failed = false
 
 	while notifyIndex < queueLength do
 		local success, err = pcall(function()
-			while notifyIndex < queueLength do
+			repeat
 				notifyIndex += 1
 				local effect = queue[notifyIndex]
 				queue[notifyIndex] = nil
 				run(effect)
-			end
+			until notifyIndex >= queueLength
 		end)
 
 		if not success then
-			didError = true
+			failed = true
 			table.insert(errors, tostring(err))
 		end
 	end
@@ -401,7 +413,7 @@ local function flush()
 	notifyIndex = 0
 	queueLength = 0
 
-	if didError then
+	if failed then
 		error(`An error occurred during effect execution:\n\n{table.concat(errors, "\n\n")}`, 0)
 	end
 end
@@ -415,17 +427,37 @@ local function endBatch()
 	flush()
 end
 
-local function signal<T>(initialValue: T): (...Update<T>) -> T
+local function signal<T>(initialValue: T): Signal<T>
 	local node: SignalNode = {
-		type = "signal",
-		status = "clean",
+		type = SIGNAL,
+		status = CLEAN,
 		subs = {},
 		currentValue = initialValue,
 		pendingValue = initialValue,
 	}
 
 	return function(...: Update<T>): T
-		if select("#", ...) > 0 then
+		if select("#", ...) == 0 then
+			-- Check if the signal has a pending update that needs to be applied
+			if node.status == DIRTY then
+				if updateSignal(node) then
+					shallowPropagateDirty(node)
+				end
+			end
+
+			-- Register this signal as a dependency of the first subscriber in the
+			-- chain that is a computed signal or an effect, skipping effect scopes
+			local sub = activeSub
+			while sub do
+				if sub.type == EFFECT or sub.type == COMPUTED then
+					link(node, sub)
+					break
+				end
+				sub = sub.subs[1]
+			end
+
+			return node.currentValue
+		else
 			local update = ...
 			local value: T
 
@@ -433,7 +465,6 @@ local function signal<T>(initialValue: T): (...Update<T>) -> T
 				local prevSub = setActiveSub(nil)
 				local success, result = pcall(update, node.pendingValue)
 				activeSub = prevSub
-
 				if success then
 					value = result
 				else
@@ -445,39 +476,20 @@ local function signal<T>(initialValue: T): (...Update<T>) -> T
 
 			if node.pendingValue ~= value then
 				node.pendingValue = value
-				node.status = "dirty"
+				node.status = DIRTY
 				propagatePending(node)
 				flush()
-				return value
-			end
-		else
-			-- Check if the signal has a pending update that needs to be applied
-			if node.status == "dirty" then
-				if updateSignal(node) then
-					shallowPropagateDirty(node)
-				end
 			end
 
-			-- Register this signal as a dependency of the first subscriber in the
-			-- chain that is a computed signal or an effect, skipping effect scopes
-			local sub = activeSub
-			while sub do
-				if sub.type == "effect" or sub.type == "computed" then
-					link(node, sub)
-					break
-				end
-				sub = sub.subs[1]
-			end
+			return value
 		end
-
-		return node.currentValue
 	end
 end
 
 local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 	local node: ComputedNode = {
-		type = "computed",
-		status = "clean",
+		type = COMPUTED,
+		status = CLEAN,
 		deps = {},
 		subs = {},
 		getter = getter,
@@ -485,17 +497,17 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 	local initialized = false
 
 	return function(): T
-		if node.status == "dirty" then
+		if node.status == DIRTY then
 			if updateComputed(node) then
 				shallowPropagateDirty(node)
 			end
-		elseif node.status == "pending" then
+		elseif node.status == PENDING then
 			if checkDirty(node) then
 				if updateComputed(node) then
 					shallowPropagateDirty(node)
 				end
 			else
-				node.status = "clean"
+				node.status = CLEAN
 			end
 		elseif not initialized then
 			-- First access should initialize the computed value
@@ -521,11 +533,11 @@ end
 
 local function effect(callback: () -> ...(() -> ())?): () -> ()
 	local node: EffectNode = {
-		type = "effect",
-		status = "clean",
+		type = EFFECT,
+		status = CLEAN,
 		deps = {},
 		subs = {},
-		queued = false,
+		queued = nil,
 		callback = callback,
 		cleanups = {},
 	}
@@ -561,8 +573,8 @@ end
 
 local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): () -> ()
 	local node: EffectScopeNode = {
-		type = "effectScope",
-		status = "clean",
+		type = EFFECT_SCOPE,
+		status = CLEAN,
 		deps = {},
 		subs = {},
 		cleanups = {},
@@ -590,11 +602,11 @@ end
 
 local function trigger(callback: () -> ...any)
 	local sub: EffectNode = {
-		type = "effect",
-		status = "dead",
+		type = EFFECT,
+		status = DISPOSED,
 		deps = {},
 		subs = {},
-		queued = false,
+		queued = nil,
 		callback = function() end,
 		cleanups = {},
 	}
@@ -635,7 +647,7 @@ local function untracked<Args..., Results...>(callback: (Args...) -> Results...,
 end
 
 local function onCleanup(callback: () -> ())
-	if activeSub and (activeSub.type == "effect" or activeSub.type == "effectScope") then
+	if activeSub and (activeSub.type == EFFECT or activeSub.type == EFFECT_SCOPE) then
 		table.insert(activeSub.cleanups, callback)
 	end
 end
