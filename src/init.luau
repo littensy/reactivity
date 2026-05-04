@@ -142,7 +142,6 @@ end
 -- when the dependency updates. If the subscriber has stale dependencies from a
 -- previous run, it will attempt to reuse the existing dependency.
 local function link(dep: DependencyNode, sub: SubscriberNode)
-	local depSubs = dep.subs
 	local subDeps = sub.deps
 	local staleDepsStart = sub.staleDepsStart
 
@@ -150,33 +149,57 @@ local function link(dep: DependencyNode, sub: SubscriberNode)
 	-- skip linking and mark it as used.
 	if staleDepsStart and subDeps[staleDepsStart] == dep then
 		sub.staleDepsStart = staleDepsStart + 1
-		return
+	else
+		table.insert(subDeps, dep)
+		table.insert(dep.subs, sub)
 	end
-
-	table.insert(subDeps, dep)
-	table.insert(depSubs, sub)
 end
 
 -- Unlink a dependency from a subscriber. If the dependency has no more
 -- subscribers after unlinking, it will be unwatched to release its resources.
-local function unlink(dep: DependencyNode, sub: SubscriberNode, depIndex: number?)
-	local depSubs = dep.subs
+local function unlink(dep: DependencyNode, sub: SubscriberNode, subDepIndex: number?)
 	local subDeps = sub.deps
+	local depSubs = dep.subs
 
-	depIndex = depIndex or table.find(subDeps, dep)
-	if depIndex then
-		table.remove(subDeps, depIndex)
+	subDepIndex = subDepIndex or table.find(subDeps, dep)
+	if subDepIndex then
+		table.remove(subDeps, subDepIndex)
 	end
 
-	local subIndex = table.find(depSubs, sub)
-	if subIndex then
-		table.remove(depSubs, subIndex)
-
-		-- Release nodes when they have no subscribers
+	local depSubIndex = table.find(depSubs, sub)
+	if depSubIndex then
+		table.remove(depSubs, depSubIndex)
 		if not depSubs[1] then
-			unwatched(dep)
+			unwatched(dep) -- Release nodes when they have no subscribers
 		end
 	end
+end
+
+-- Unlink a range of dependencies from a subscriber, used when purging stale
+-- dependencies after a run.
+local function unlinkRange(sub: SubscriberNode, depsStart: number, depsEnd: number)
+	local subDeps = sub.deps
+	local range = depsEnd - depsStart + 1
+
+	-- Unlink from depSubs first to access stale dependencies before they are
+	-- removed, in reverse order to exclude stale subscriptions from being
+	-- shifted by table.remove, and to ensure safe unwatching
+	for depIndex = depsEnd, depsStart, -1 do
+		local dep = subDeps[depIndex]
+		local depSubs = dep.subs
+		local depSubIndex = table.find(depSubs, sub)
+		if depSubIndex then
+			table.remove(depSubs, depSubIndex)
+			if not depSubs[1] then
+				unwatched(dep) -- Release nodes when they have no subscribers
+			end
+		end
+	end
+
+	-- Optimize table removal by shifting the remaining dependencies in a
+	-- batch, instead of removing each dependency one by one which would cause
+	-- shifting on every removal
+	table.move(subDeps, depsEnd + 1, #subDeps + range, depsStart)
 end
 
 -- Remove any stale dependencies that were not reused during the current run.
@@ -185,9 +208,9 @@ end
 local function purgeStaleDeps(sub: SubscriberNode)
 	local staleDepsStart = sub.staleDepsStart
 	if staleDepsStart then
-		local subDeps = sub.deps
-		for index = sub.staleDepsEnd :: number, staleDepsStart, -1 do
-			unlink(subDeps[index], sub, index)
+		local staleDepsEnd = sub.staleDepsEnd :: number
+		if staleDepsEnd >= staleDepsStart then
+			unlinkRange(sub, staleDepsStart, staleDepsEnd)
 		end
 		sub.staleDepsStart = nil
 		sub.staleDepsEnd = nil
@@ -197,13 +220,12 @@ end
 -- Clear all dependencies from a subscriber. Dependencies are removed in
 -- reverse order to avoid shifting indices when unlinking.
 local function clearDeps(sub: SubscriberNode)
-	local subDeps = sub.deps
 	if sub.staleDepsStart then
 		sub.staleDepsStart = nil
 		sub.staleDepsEnd = nil
 	end
-	for index = #subDeps, 1, -1 do
-		unlink(subDeps[index], sub)
+	for depIndex = #sub.deps, 1, -1 do
+		unlink(sub.deps[depIndex], sub, depIndex)
 	end
 end
 
@@ -617,7 +639,7 @@ local function trigger(callback: () -> ...any)
 
 	local dep = sub.deps[1]
 	while dep do
-		unlink(dep, sub)
+		unlink(dep, sub, 1)
 		propagatePending(dep)
 		shallowPropagateDirty(dep)
 		dep = sub.deps[1]
