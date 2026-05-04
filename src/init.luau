@@ -31,7 +31,7 @@ type EffectNode = Subscriber & Dependency & {
 	status: typeof(CLEAN) | typeof(DIRTY) | typeof(PENDING) | typeof(DISPOSED),
 	read callback: () -> ...(() -> ())?,
 	read cleanups: { () -> () },
-	queued: boolean?,
+	queued: true?,
 }
 
 type EffectScopeNode = Subscriber & Dependency & {
@@ -81,22 +81,18 @@ local function queueEffect(effect: EffectNode)
 	end
 
 	local startIndex = queueLength + 1
+	local nextEffect = effect
 
 	-- Collect this effect and its parent effects to ensure dirty/pending
 	-- parent effects are checked
 	repeat
-		effect.queued = true
+		nextEffect.queued = true
 		queueLength += 1
-		queue[queueLength] = effect
+		queue[queueLength] = nextEffect
 
-		-- Traverse to the next parent if it exists and is not queued
-		local sub = effect.subs[1]
-		if sub and sub.type == EFFECT and not sub.queued then
-			effect = sub
-		else
-			break
-		end
-	until false
+		-- Traverse to the next parent effect if it exists and is not queued
+		nextEffect = nextEffect.subs[1]
+	until not nextEffect or nextEffect.type ~= EFFECT or nextEffect.queued
 
 	local endIndex = queueLength
 
@@ -207,6 +203,8 @@ local function clearDeps(sub: SubscriberNode)
 	for depIndex = #sub.deps, 1, -1 do
 		unlink(sub.deps[depIndex], sub, depIndex)
 	end
+	sub.staleDepsStart = 1
+	sub.staleDepsEnd = 0
 end
 
 local function runCleanups(cleanups: { () -> () })
