@@ -5,6 +5,11 @@ local signal = reactivity.signal
 local computed = reactivity.computed
 local effect = reactivity.effect
 
+--[[
+	Benchmarks have been adapted from:
+	https://github.com/milomg/js-reactivity-benchmark
+]]
+
 local function busy(): number
 	local a = 0
 	for i = 1, 100 do
