@@ -87,6 +87,39 @@ end
 
 do
 	local head = signal(0)
+	local double = computed(function()
+		return head() * 2
+	end)
+	local inverse = computed(function()
+		return -head()
+	end)
+	local current = computed(function()
+		local result = 0
+		for i = 0, 19 do
+			result += if head() % 2 == 1 and i % 2 == 1 then double() else inverse()
+		end
+		return result
+	end)
+
+	local callCounter = 0
+	effect(function()
+		current()
+		callCounter += 1
+	end)
+
+	bench("unstable 50%", function()
+		head(1)
+		assert(current() == 10)
+		callCounter = 0
+		for i = 0, 99 do
+			head(i)
+		end
+		assert(callCounter == 100)
+	end)
+end
+
+do
+	local head = signal(0)
 	local last: () -> number = head
 	local callCounter = 0
 
