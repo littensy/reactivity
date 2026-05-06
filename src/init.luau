@@ -455,10 +455,8 @@ local function signal<T>(initialValue: T): Signal<T>
 				end
 				sub = sub.subs[1]
 			end
-
-			return node.currentValue
 		else
-			local update = ...
+			local update: Update<T> = ...
 			local value: T
 
 			if type(update) == "function" then
@@ -480,9 +478,9 @@ local function signal<T>(initialValue: T): Signal<T>
 				propagatePending(node)
 				flush()
 			end
-
-			return value
 		end
+
+		return node.pendingValue
 	end
 end
 
