@@ -81,12 +81,12 @@ type Subscriber = {
 
 type Dependency = {
 	-- The subscribers to notify when this dependency updates. In effects and
-	-- effect scopes, this tracks the parent subscriber.
+	-- effect scopes, this tracks the parent subscriber instead.
 	read subs: { SubscriberNode },
 }
 
-type SubscriberNode = ComputedNode | EffectNode | EffectScopeNode
-type DependencyNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
+export type SubscriberNode = ComputedNode | EffectNode | EffectScopeNode
+export type DependencyNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
 export type ReactiveNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
 
 export type Update<T> = ((current: T) -> T) | T
@@ -578,8 +578,8 @@ local function effect(callback: () -> ...(() -> ())?): () -> ()
 	}
 
 	-- Clean up the node when the parent subscriber updates or gets disposed by
-	-- linking to the parent subscriber, which allows the process of purging
-	-- stale dependencies after re-evaluation to also clean up effects.
+	-- linking to the parent subscriber, which allows the process of clearing
+	-- dependencies to also clean up inner effects.
 	if activeSub then
 		link(node, activeSub)
 	end
@@ -618,8 +618,8 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 	}
 
 	-- Clean up the node when the parent subscriber updates or gets disposed by
-	-- linking to the parent subscriber, which allows the process of purging
-	-- stale dependencies after re-evaluation to also clean up effects.
+	-- linking to the parent subscriber, which allows the process of clearing
+	-- dependencies to also clean up inner effects.
 	if activeSub and not detached then
 		link(node, activeSub)
 	end
