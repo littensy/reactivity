@@ -12,47 +12,82 @@ local COMPUTED: "COMPUTED" = 1 :: any
 local EFFECT: "EFFECT" = 2 :: any
 local EFFECT_SCOPE: "EFFECT_SCOPE" = 3 :: any
 
-type SignalNode<T = any> = Dependency & {
+export type SignalNode<T = any> = Dependency & {
+	-- The type of the node (0 = signal).
 	read type: typeof(SIGNAL),
+	-- If the signal's status is dirty, it has a pending value change that has
+	-- not been applied yet. This allows the signal to defer updates until the
+	-- next access, skipping updates for changes that were reverted.
 	status: typeof(CLEAN) | typeof(DIRTY),
+	-- The value the signal last returned, which may be outdated.
 	currentValue: T,
+	-- The latest value passed to the signal, which may not have been applied
+	-- yet if the signal is dirty.
 	pendingValue: T,
 }
 
-type ComputedNode<T = any> = Subscriber & Dependency & {
+export type ComputedNode<T = any> = Subscriber & Dependency & {
+	-- The type of the node (1 = computed signal).
 	read type: typeof(COMPUTED),
+	-- The status of the computed signal, which tracks whether it needs to be
+	-- recomputed based on changes to its dependencies. Dirty means it needs to
+	-- be recomputed, and pending means to check dependencies for changes.
 	status: typeof(CLEAN) | typeof(DIRTY) | typeof(PENDING),
+	-- The function used to compute the value of the computed signal, taking
+	-- the previous value as an argument.
 	read getter: (T?) -> T,
+	-- The current value of the computed signal.
 	value: T,
 }
 
-type EffectNode = Subscriber & Dependency & {
+export type EffectNode = Subscriber & Dependency & {
+	-- The type of the node (2 = effect).
 	read type: typeof(EFFECT),
+	-- The status of the effect. An additional disposed status determines
+	-- whether future updates should be ignored.
 	status: typeof(CLEAN) | typeof(DIRTY) | typeof(PENDING) | typeof(DISPOSED),
+	-- The function to run when the effect is triggered, which may return a
+	-- cleanup function or subscribe to dependencies.
 	read callback: () -> ...(() -> ())?,
+	-- Cleanup functions returned by the effect's callback, which are run when
+	-- the effect is re-run or disposed.
 	read cleanups: { () -> () },
-	queued: true?,
+	-- Whether this effect is currently queued to run, used to avoid queuing
+	-- the same effect until it has a chance to run and reset this flag.
+	queued: boolean,
 }
 
-type EffectScopeNode = Subscriber & Dependency & {
+export type EffectScopeNode = Subscriber & Dependency & {
+	-- The type of the node (3 = effect scope).
 	read type: typeof(EFFECT_SCOPE),
+	-- The status of the effect scope should never be dirty or pending, but it
+	-- can be disposed to clean up all of its child effects at once.
 	status: typeof(CLEAN) | typeof(DIRTY) | typeof(PENDING) | typeof(DISPOSED),
+	-- Cleanup functions returned by the effect scope's callback, which are run
+	-- when the effect scope is disposed.
 	read cleanups: { () -> () },
 }
 
 type Subscriber = {
+	-- The dependencies that this subscriber is subscribed to, which determine
+	-- when it should be notified of updates.
 	read deps: { DependencyNode },
+	-- The range of stale dependencies that can potentially be reused during
+	-- the next run. After all dependencies have been processed, any stale
+	-- dependency that was not reused will be removed.
 	staleDepsStart: number,
 	staleDepsEnd: number,
 }
 
 type Dependency = {
+	-- The subscribers to notify when this dependency updates. In effects and
+	-- effect scopes, this tracks the parent subscriber.
 	read subs: { SubscriberNode },
 }
 
 type SubscriberNode = ComputedNode | EffectNode | EffectScopeNode
 type DependencyNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
-type ReactiveNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
+export type ReactiveNode = SignalNode | ComputedNode | EffectNode | EffectScopeNode
 
 export type Update<T> = ((current: T) -> T) | T
 export type Signal<T> = (...Update<T>) -> T
@@ -83,14 +118,14 @@ local function queueEffect(effect: EffectNode)
 	local startIndex = queueLength + 1
 	local nextEffect = effect
 
-	-- Collect this effect and its parent effects to ensure dirty/pending
-	-- parent effects are checked
+	-- Queue this effect and its parent effects to ensure dirty/pending outer
+	-- effects can run before inner effects
 	repeat
 		nextEffect.queued = true
 		queueLength += 1
 		queue[queueLength] = nextEffect
 
-		-- Traverse to the next parent effect if it exists and is not queued
+		-- Traverse up the parent chain to queue any parent effects as well
 		nextEffect = nextEffect.subs[1]
 	until not nextEffect or nextEffect.type ~= EFFECT or nextEffect.queued
 
@@ -105,8 +140,8 @@ local function queueEffect(effect: EffectNode)
 	end
 end
 
--- Mark immediate subscribers as dirty without checking their dependencies,
--- used when a node is updated to cause all of its subscribers to be updated.
+-- Marks immediate subscribers as dirty without checking their dependencies.
+-- Used when a node is updated to cause all of its subscribers to be updated.
 local function shallowPropagateDirty(dep: DependencyNode)
 	for _, sub in dep.subs do
 		if sub.status == PENDING then
@@ -118,7 +153,7 @@ local function shallowPropagateDirty(dep: DependencyNode)
 	end
 end
 
--- Mark nested subscribers as pending and queue effect runs, used when a node
+-- Marks nested subscribers as pending and queue effect runs. Used when a node
 -- receives an update but has not been accessed yet, so it may not be known if
 -- the update will cause a change.
 local function propagatePending(dep: DependencyNode)
@@ -134,7 +169,7 @@ local function propagatePending(dep: DependencyNode)
 	end
 end
 
--- Link a dependency to a subscriber, so that the subscriber will be notified
+-- Links a dependency to a subscriber, so that the subscriber will be notified
 -- when the dependency updates. If the subscriber has stale dependencies from a
 -- previous run, it will attempt to reuse the existing dependency.
 local function link(dep: DependencyNode, sub: SubscriberNode)
@@ -154,7 +189,7 @@ local function link(dep: DependencyNode, sub: SubscriberNode)
 	end
 end
 
--- Unlink a dependency from a subscriber. If the dependency has no more
+-- Unlinks a dependency from a subscriber. If the dependency has no more
 -- subscribers after unlinking, it will be unwatched to release its resources.
 local function unlink(dep: DependencyNode, sub: SubscriberNode, subDepIndex: number?)
 	table.remove(sub.deps, subDepIndex or table.find(sub.deps, dep) or 0)
@@ -165,9 +200,9 @@ local function unlink(dep: DependencyNode, sub: SubscriberNode, subDepIndex: num
 	end
 end
 
--- Remove any stale dependencies that were not reused during the current run.
--- A dependency is stale if the link function did not mark it as used and
--- increment staleDepsStart to skip it.
+-- Removes any stale dependencies that were not reused during the current run.
+-- A dependency is stale if the link function did not mark it as used by
+-- excluding it from the stale dependency range.
 local function purgeStaleDeps(sub: SubscriberNode)
 	local staleDepsStart = sub.staleDepsStart
 	local staleDepsEnd = sub.staleDepsEnd
@@ -180,37 +215,49 @@ local function purgeStaleDeps(sub: SubscriberNode)
 	local range = staleDepsEnd - staleDepsStart + 1
 
 	-- Unlink from depSubs first to access stale dependencies before they are
-	-- removed, in reverse order to exclude stale subscriptions from being
-	-- shifted by table.remove, and to ensure safe unwatching
-	for depIndex = staleDepsEnd, staleDepsStart, -1 do
+	-- removed from subDeps
+	for depIndex = staleDepsStart, staleDepsEnd do
 		local dep = subDeps[depIndex]
-		local depSubs = dep.subs
-		table.remove(depSubs, table.find(depSubs, sub) or 0)
-		if not depSubs[1] then
-			unwatched(dep) -- Release nodes when they have no subscribers
+		if dep then
+			local depSubs = dep.subs
+			table.remove(depSubs, table.find(depSubs, sub) or 0)
+			if not depSubs[1] then
+				unwatched(dep) -- Release nodes when they have no subscribers
+			end
 		end
 	end
 
 	-- Optimize table removal by shifting the remaining dependencies in a
-	-- batch, instead of removing each dependency one by one which would cause
-	-- shifting on every removal
+	-- batch, instead of removing each dependency one by one, which would cause
+	-- shifting on every removal.
 	table.move(subDeps, staleDepsEnd + 1, #subDeps + range, staleDepsStart)
 end
 
--- Clear all dependencies from a subscriber. Dependencies are removed in
--- reverse order to avoid shifting indices when unlinking.
 local function clearDeps(sub: SubscriberNode)
-	for depIndex = #sub.deps, 1, -1 do
-		unlink(sub.deps[depIndex], sub, depIndex)
+	local nextDep = sub.deps[1]
+	while nextDep do
+		unlink(nextDep, sub, 1)
+		nextDep = sub.deps[1]
 	end
 	sub.staleDepsStart = 1
 	sub.staleDepsEnd = 0
 end
 
-local function runCleanups(cleanups: { () -> () })
-	local errors: { string } = {}
-	local failed = false
+local function unlinkInnerEffects(sub: SubscriberNode)
+	local deps = sub.deps
+	local index = 1
+	local nextDep = deps[index]
+	while nextDep do
+		if nextDep.type == EFFECT or nextDep.type == EFFECT_SCOPE then
+			unlink(nextDep, sub, index)
+		else
+			index += 1
+		end
+		nextDep = deps[index]
+	end
+end
 
+local function runCleanups(cleanups: { () -> () })
 	for index, cleanup in cleanups do
 		cleanups[index] = nil
 
@@ -219,52 +266,34 @@ local function runCleanups(cleanups: { () -> () })
 		activeSub = prevSub
 
 		if not success then
-			failed = true
-			table.insert(errors, tostring(err))
+			error(err, 0)
 		end
-	end
-
-	if failed then
-		error(`Errors occurred during effect cleanup:\n\n{table.concat(errors, "\n\n")}`, 0)
 	end
 end
 
-local function stopEffect(effect: EffectNode)
+local function stopEffect(effect: EffectNode | EffectScopeNode)
 	effect.status = DISPOSED
-	effect.queued = nil
+
+	if effect.type == EFFECT then
+		effect.queued = false
+	end
 
 	-- Unlink from dependencies and child effects
 	clearDeps(effect)
 
-	-- Unlink from the parent effect, if it exists
-	local sub = effect.subs[1]
-	if sub then
-		unlink(effect, sub)
+	-- Unlink from the parent node
+	if effect.subs[1] then
+		unlink(effect, effect.subs[1])
 	end
 
 	runCleanups(effect.cleanups)
 end
 
-local function stopEffectScope(effectScope: EffectScopeNode)
-	-- Unlink from dependencies and child effects
-	clearDeps(effectScope)
-
-	-- Unlink from the parent effect, if it exists
-	local sub = effectScope.subs[1]
-	if sub then
-		unlink(effectScope, sub)
-	end
-
-	runCleanups(effectScope.cleanups)
-end
-
-function unwatched(node: ReactiveNode)
-	if node.type == EFFECT then
+function unwatched(node: DependencyNode)
+	if node.type == EFFECT or node.type == EFFECT_SCOPE then
 		-- If an effect loses its only subscriber, its parent effect re-ran or
 		-- got disposed, so this child effect should be disposed as well
 		stopEffect(node)
-	elseif node.type == EFFECT_SCOPE then
-		stopEffectScope(node)
 	elseif node.type == COMPUTED then
 		-- Clearing a computed node's dependencies when it loses all of its
 		-- subscribers allows it to be garbage collected
@@ -274,13 +303,12 @@ function unwatched(node: ReactiveNode)
 end
 
 local function updateComputed(computed: ComputedNode): boolean
-	local oldValue = computed.value
-
 	computed.status = CLEAN
 	computed.staleDepsStart = 1
 	computed.staleDepsEnd = #computed.deps
 
 	local prevSub = setActiveSub(computed)
+	local oldValue = computed.value
 	local success, newValue = pcall(computed.getter, oldValue)
 	activeSub = prevSub
 
@@ -335,7 +363,7 @@ local function checkDirty(sub: SubscriberNode): boolean
 						shallowPropagateDirty(dep)
 						return true
 					end
-				else
+				elseif dep.status == PENDING then
 					-- The update resulted in no change and can be skipped
 					dep.status = CLEAN
 				end
@@ -349,13 +377,18 @@ local function run(effect: EffectNode)
 	if effect.status == DIRTY or (effect.status == PENDING and checkDirty(effect)) then
 		runCleanups(effect.cleanups)
 
+		-- Clean up inner effects before re-evaluating this effect, since
+		-- relying on purgeStaleDeps to clean up effects after re-running
+		-- might run cleanups in an unexpected order
+		unlinkInnerEffects(effect)
+
 		-- Cancel the run if the effect was stopped during cleanup
 		if effect.status == DISPOSED then
 			return
 		end
 
 		effect.status = CLEAN
-		effect.queued = nil
+		effect.queued = false
 		effect.staleDepsStart = 1
 		effect.staleDepsEnd = #effect.deps
 
@@ -363,8 +396,7 @@ local function run(effect: EffectNode)
 		local success, cleanup = pcall(effect.callback)
 		activeSub = prevSub
 
-		-- Remove any dependencies that were not accessed during this run.
-		-- Child effects will lose their only subscriber and get unwatched.
+		-- Remove any dependencies that were not accessed during this run
 		purgeStaleDeps(effect)
 
 		if success and type(cleanup) == "function" then
@@ -376,11 +408,11 @@ local function run(effect: EffectNode)
 		-- If the effect was disposed during its execution, run any cleanups
 		-- that might have been missed
 		if effect.status == DISPOSED then
-			runCleanups(effect.cleanups)
+			stopEffect(effect)
 		end
-	else
+	elseif effect.status == PENDING then
 		effect.status = CLEAN
-		effect.queued = nil
+		effect.queued = false
 	end
 end
 
@@ -394,6 +426,8 @@ local function flush()
 	local errors: { string } = {}
 	local failed = false
 
+	-- Run all queued effects, catching errors to ensure all effects have a
+	-- chance to run and clean up before the error is thrown
 	while notifyIndex < queueLength do
 		local success, err = pcall(function()
 			repeat
@@ -438,27 +472,24 @@ local function signal<T>(initialValue: T): Signal<T>
 
 	return function(...: Update<T>): T
 		if select("#", ...) == 0 then
-			-- Check if the signal has a pending update that needs to be applied
+			-- Check if the signal has a pending value that needs to be applied
 			if node.status == DIRTY then
 				if updateSignal(node) then
 					shallowPropagateDirty(node)
 				end
 			end
 
-			-- Register this signal as a dependency of the first subscriber in the
-			-- chain that is a computed signal or an effect, skipping effect scopes
-			local sub = activeSub
-			while sub do
-				if sub.type == EFFECT or sub.type == COMPUTED then
-					link(node, sub)
-					break
-				end
-				sub = sub.subs[1]
+			-- Add the signal as a dependency of the active subscriber, so it
+			-- will be notified of future updates
+			if activeSub then
+				link(node, activeSub)
 			end
 		else
 			local update: Update<T> = ...
 			local value: T
 
+			-- Unwrap the value if an updater function was passed, otherwise
+			-- use the value directly
 			if type(update) == "function" then
 				local prevSub = setActiveSub(nil)
 				local success, result = pcall(update, node.pendingValue)
@@ -472,6 +503,8 @@ local function signal<T>(initialValue: T): Signal<T>
 				value = update
 			end
 
+			-- If the new value is different from the current pending value,
+			-- mark the signal as dirty and propagate the change to subscribers
 			if node.pendingValue ~= value then
 				node.pendingValue = value
 				node.status = DIRTY
@@ -506,7 +539,7 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 				if updateComputed(node) then
 					shallowPropagateDirty(node)
 				end
-			else
+			elseif node.status == PENDING then
 				node.status = CLEAN
 			end
 		elseif not initialized then
@@ -539,14 +572,14 @@ local function effect(callback: () -> ...(() -> ())?): () -> ()
 		subs = {},
 		staleDepsStart = 1,
 		staleDepsEnd = 0,
-		queued = nil,
 		callback = callback,
+		queued = false,
 		cleanups = {},
 	}
 
-	-- Inner effects are tracked as a dependency of the parent effect, so that
-	-- they can be automatically cleaned up when the parent effect re-runs, and
-	-- to ensure the correct execution order when nested effects are notified
+	-- Clean up the node when the parent subscriber updates or gets disposed by
+	-- linking to the parent subscriber, which allows the process of purging
+	-- stale dependencies after re-evaluation to also clean up effects.
 	if activeSub then
 		link(node, activeSub)
 	end
@@ -584,7 +617,9 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 		cleanups = {},
 	}
 
-	-- Inner effect scopes are tracked as a dependency of the parent effect
+	-- Clean up the node when the parent subscriber updates or gets disposed by
+	-- linking to the parent subscriber, which allows the process of purging
+	-- stale dependencies after re-evaluation to also clean up effects.
 	if activeSub and not detached then
 		link(node, activeSub)
 	end
@@ -600,7 +635,7 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 	end
 
 	return function()
-		stopEffectScope(node)
+		stopEffect(node)
 	end
 end
 
@@ -612,8 +647,8 @@ local function trigger(callback: () -> ...any)
 		subs = {},
 		staleDepsStart = 1,
 		staleDepsEnd = 0,
-		queued = nil,
 		callback = function() end,
+		queued = false,
 		cleanups = {},
 	}
 

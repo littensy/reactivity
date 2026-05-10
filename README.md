@@ -4,11 +4,16 @@ I wanted to learn more about [`alien-signals`](https://github.com/stackblitz/ali
 
 - Store subscribers and dependencies in-place in arrays instead of a linked list
 - Add cleanup functions to effects and effect scopes
+- Nested effects are cleaned up before the next evaluation instead of while purging stale dependencies
 - Signals accept an update function to avoid tracking dependencies during updates that access the old value
 - Error handling in `flush()` runs all queued effects instead of stopping at the first error
 - Remove recursion checks for effect callbacks and computed signal getters
 
 The [`alien-signals` Deep Dive](https://gist.github.com/johnsoncodehk/59e79a0cfa5bb3421b5d166a08e42f30) by Johnson Chu has been a big help!
+
+## Todo
+
+- Ensure old inner effects get disposed before new inner effects
 
 ## Testing
 
