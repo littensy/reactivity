@@ -12,7 +12,7 @@ local effect = reactivity.effect
 
 local function busy(): number
 	local a = 0
-	for i = 1, 100 do
+	for _ = 1, 100 do
 		a += 1
 	end
 	return a
@@ -62,7 +62,7 @@ do
 	end)
 	local current = computed(function()
 		local result = 0
-		for i = 0, 19 do
+		for _ = 0, 19 do
 			result += if head() % 2 == 1 then double() else inverse()
 		end
 		return result

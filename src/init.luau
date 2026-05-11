@@ -37,7 +37,7 @@ export type ComputedNode<T = any> = Subscriber & Dependency & {
 	-- the previous value as an argument.
 	read getter: (T?) -> T,
 	-- The current value of the computed signal.
-	value: T,
+	value: T?,
 }
 
 export type EffectNode = Subscriber & Dependency & {
@@ -462,7 +462,7 @@ local function endBatch()
 end
 
 local function signal<T>(initialValue: T): Signal<T>
-	local node: SignalNode = {
+	local node: SignalNode<T> = {
 		type = SIGNAL,
 		status = CLEAN,
 		subs = {},
@@ -485,22 +485,19 @@ local function signal<T>(initialValue: T): Signal<T>
 				link(node, activeSub)
 			end
 		else
-			local update: Update<T> = ...
-			local value: T
+			local value = ...
 
 			-- Unwrap the value if an updater function was passed, otherwise
 			-- use the value directly
-			if type(update) == "function" then
+			if type(value) == "function" then
 				local prevSub = setActiveSub(nil)
-				local success, result = pcall(update, node.pendingValue)
+				local success, result = pcall(value, node.pendingValue)
 				activeSub = prevSub
 				if success then
 					value = result
 				else
 					error(result, 2)
 				end
-			else
-				value = update
 			end
 
 			-- If the new value is different from the current pending value,
@@ -518,7 +515,7 @@ local function signal<T>(initialValue: T): Signal<T>
 end
 
 local function computed<T>(getter: (previousValue: T?) -> T): () -> T
-	local node: ComputedNode = {
+	local node: ComputedNode<T> = {
 		type = COMPUTED,
 		status = CLEAN,
 		deps = {},
@@ -545,7 +542,7 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 		elseif not initialized then
 			-- First access should initialize the computed value
 			local prevSub = setActiveSub(node)
-			local success, result = pcall(node.getter)
+			local success, result = pcall(node.getter, nil)
 			activeSub = prevSub
 
 			if success then
