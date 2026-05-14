@@ -94,7 +94,7 @@ test("should dispose inner effects if created in an effect", function()
 	assert(triggers == 2, "ran after dispose")
 end)
 
-test("#105 signal and computed should link to the same node in effectScope", function()
+test("signal and computed should link to the same node in effectScope", function()
 	local a = signal(0)
 	local b = computed(function()
 		return 0
@@ -118,7 +118,7 @@ test("#105 signal and computed should link to the same node in effectScope", fun
 	assert(triggers == 3, "did not run after computed update")
 end)
 
-test("#105 effect should respond to both signal and computed changes through scope", function()
+test("effect should respond to both signal and computed changes through scope", function()
 	local s = signal(0)
 	local c = computed(function()
 		return s() * 2
@@ -142,7 +142,7 @@ test("#105 effect should respond to both signal and computed changes through sco
 	assert(triggers == 3, "did not run after computed update")
 end)
 
-test("#105 scope should respond to consecutive signal updates", function()
+test("scope should respond to consecutive signal updates", function()
 	local s = signal(0)
 	local triggers = 0
 
@@ -160,7 +160,7 @@ test("#105 scope should respond to consecutive signal updates", function()
 	assert(triggers == 3, "did not run after second update")
 end)
 
-test("#105 computed in standalone scope should cache and clean up", function()
+test("computed in standalone scope should cache and clean up", function()
 	local s = signal(0)
 	local computeCount = 0
 

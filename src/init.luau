@@ -366,7 +366,7 @@ local function checkDirty(sub: Subscriber): boolean
 						shallowPropagateDirty(dep)
 						return true
 					end
-				elseif dep.status == PENDING then
+				else
 					-- The update resulted in no change and can be skipped
 					dep.status = CLEAN
 				end
@@ -413,7 +413,7 @@ local function run(effect: EffectNode)
 		if effect.status == DISPOSED then
 			stopEffect(effect)
 		end
-	elseif effect.status == PENDING then
+	elseif effect.status ~= DISPOSED then
 		effect.status = CLEAN
 		effect.queued = false
 	end
@@ -539,7 +539,7 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 				if updateComputed(node) then
 					shallowPropagateDirty(node)
 				end
-			elseif node.status == PENDING then
+			else
 				node.status = CLEAN
 			end
 		elseif not initialized then

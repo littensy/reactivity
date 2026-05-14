@@ -544,7 +544,7 @@ test("inner effects should dispose before outer effect re-runs", function()
 end)
 
 -- https://github.com/stackblitz/alien-signals/pull/110
-test.describe("issue #109", function()
+test.describe("checkDirty graph mutation", function()
 	test("should handle inner effect clearing outer computed's deps on rerun", function()
 		local src = signal(false)
 		local stopEffect: () -> ()
@@ -833,6 +833,116 @@ test.describe("issue #109", function()
 			b()
 		end)
 		s(1)
+	end)
+end)
+
+test.describe("parent-child link integrity", function()
+	-- S(a) ─→ E_outer{ E_inner ─→ S(b) }
+	--
+	-- Outer reads a and creates an inner effect that reads b.
+	-- After b changes (which re-runs only the inner), the outer
+	-- must still respond to subsequent writes to its own dep a.
+	--
+	-- See https://github.com/stackblitz/alien-signals/issues/115
+	test("outer keeps responding to own deps after inner re-runs", function()
+		local a = signal(0)
+		local b = signal(0)
+		local outerRuns = 0
+		local innerRuns = 0
+
+		effect(function()
+			a()
+			outerRuns += 1
+			effect(function()
+				b()
+				innerRuns += 1
+			end)
+		end)
+		assert(outerRuns == 1, "outer should have run once initially")
+		assert(innerRuns == 1, "inner should have run once initially")
+
+		-- Trigger inner via b — outer must NOT re-run (b is not its dep)
+		b(1)
+		assert(outerRuns == 1, "outer should not have re-run after b update")
+		assert(innerRuns >= 2, "inner should have re-run after b update")
+
+		-- Trigger outer via a — must re-run despite inner having re-run earlier
+		a(1)
+		assert(outerRuns == 2, "outer should have re-run after a update")
+	end)
+
+	-- S(a) ─→ E_outer{ E_inner1 ─→ S(b1),  E_inner2 ─→ S(b2) }
+	--
+	-- Outer creates two sibling inner effects. After only one of them
+	-- re-runs (via its own dep), the outer must still respond to a.
+	-- Same parent-child link integrity property as above, but with
+	-- sibling inners — could expose bugs where one inner's re-run
+	-- corrupts the other or the parent's link.
+	test("outer responds after one of multiple sibling inners re-runs", function()
+		local a = signal(0)
+		local b1 = signal(0)
+		local b2 = signal(0)
+		local outerRuns = 0
+		local inner1Runs = 0
+		local inner2Runs = 0
+
+		effect(function()
+			a()
+			outerRuns += 1
+			effect(function()
+				b1()
+				inner1Runs += 1
+			end)
+			effect(function()
+				b2()
+				inner2Runs += 1
+			end)
+		end)
+		assert(outerRuns == 1, "outer should have run once initially")
+		assert(inner1Runs == 1, "inner1 should have run once initially")
+		assert(inner2Runs == 1, "inner2 should have run once initially")
+
+		-- Only inner1 re-runs
+		b1(1)
+		assert(outerRuns == 1, "outer should not have re-run after b1 update")
+		assert(inner1Runs >= 2, "inner1 should have re-run after b1 update")
+
+		-- Outer must still respond to its own dep
+		a(1)
+		assert(outerRuns == 2, "outer should have re-run after a update")
+	end)
+
+	-- S(a) ─→ E_outer{ E_inner ─→ S(b) }
+	-- b.write × 3
+	--
+	-- Inner re-runs multiple times via successive writes to b. After
+	-- the burst, the outer must still respond to a. Verifies the
+	-- parent-child link survives repeated inner re-runs, not just one.
+	test("outer responds after inner re-runs multiple times", function()
+		local a = signal(0)
+		local b = signal(0)
+		local outerRuns = 0
+		local innerRuns = 0
+
+		effect(function()
+			a()
+			outerRuns += 1
+			effect(function()
+				b()
+				innerRuns += 1
+			end)
+		end)
+		assert(outerRuns == 1, "outer should have run once initially")
+		assert(innerRuns == 1, "inner should have run once initially")
+
+		b(1)
+		b(2)
+		b(3)
+		assert(outerRuns == 1, "outer should not have re-run after b updates")
+		assert(innerRuns >= 2, "inner should have re-run after b updates")
+
+		a(1)
+		assert(outerRuns == 2, "outer should have re-run after a update")
 	end)
 end)
 

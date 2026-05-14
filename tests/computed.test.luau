@@ -102,48 +102,6 @@ test("should receive previous value", function()
 	assert(table.concat(calls) == "024", `should only call on even updates, got {table.concat(calls)}`)
 end)
 
--- Skipped because recursive computed side effects are not supported
--- https://github.com/vuejs/core/blob/minor/packages/reactivity/__tests__/computed.spec.ts#L875
-test.skip("should chained computeds keep reactivity when computed effect happens", function()
-	local v = signal("Hello")
-	local c = computed(function()
-		v(v() .. " World")
-		return v()
-	end)
-	local d = computed(function()
-		return c()
-	end)
-	local e = computed(function()
-		return d()
-	end)
-	local res = computed(function()
-		return d() .. " | " .. e()
-	end)
-
-	assert(res() == "Hello World | Hello World", res())
-
-	v(v() .. " World")
-	assert(res() == "Hello World World World World | Hello World World World World", res())
-end)
-
--- Skipped because recursive computed side effects are not supported
--- https://github.com/vuejs/core/blob/minor/packages/reactivity/__tests__/computed.spec.ts#L580
-test.skip("should not trigger effect scheduler by recursive computed effect", function()
-	local v = signal("Hello")
-	local c = computed(function()
-		v(v() .. " World")
-		return v()
-	end)
-	local comp = computed(function()
-		return c()
-	end)
-
-	assert(comp() == "Hello World", comp())
-
-	v(v() .. " World")
-	assert(comp() == "Hello World World World World", comp())
-end)
-
 -- https://github.com/vuejs/core/blob/minor/packages/reactivity/__tests__/computed.spec.ts#L528
 test("should not override queried MaybeDirty result", function()
 	local v1 = signal(nil :: any)
@@ -175,29 +133,30 @@ test("should not override queried MaybeDirty result", function()
 	assert(c3() == "yes", "should return correct value after update")
 end)
 
--- Skipped because recursive computed side effects are not supported
--- https://github.com/vuejs/core/blob/minor/packages/reactivity/__tests__/computed.spec.ts#L503
-test.skip("should trigger effect even computed already dirty", function()
-	local calls: { string } = {}
-	local v = signal(0)
-	local c1 = computed(function()
-		if v() == 0 then
-			v(1)
-		end
-		return "foo"
+test("consecutive inner resets through computed chain", function()
+	local s = signal(0)
+	local c = computed(function()
+		return s()
 	end)
-	local c2 = computed(function()
-		return v() .. c1()
-	end)
+	local calls = {}
 
 	effect(function()
-		table.insert(calls, c2())
+		table.insert(calls, c())
+		if c() > 0 then
+			s(0)
+		end
 	end)
-	assert(table.concat(calls, ",") == "0foo", table.concat(calls, ","))
-	assert(v() == 1, `expected 1 for v(), got {v()}`)
-	v(2)
-	assert(table.concat(calls, ",") == "0foo,2foo", table.concat(calls, ","))
-	assert(v() == 2, `expected 2 for v(), got {v()}`)
+
+	assert(table.concat(calls) == "0", "bad initial runs")
+	s(1)
+	assert(s() == 0, "bad s value")
+	assert(table.concat(calls) == "010", `bad runs after s(1), got {table.concat(calls)}`)
+	s(2)
+	assert(s() == 0, "bad s value")
+	assert(table.concat(calls) == "01020", `bad runs after s(2), got {table.concat(calls)}`)
+	s(3)
+	assert(s() == 0, "bad s value")
+	assert(table.concat(calls) == "0102030", `bad runs after s(3), got {table.concat(calls)}`)
 end)
 
 return {}
