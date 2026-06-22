@@ -7,6 +7,7 @@ I wanted to learn more about [`alien-signals`](https://github.com/stackblitz/ali
 - Signals accept an update function, preventing accidental dependency tracking when performing updates that depend on the old value
 - Error handling in `flush()` runs all queued effects instead of stopping at the first error
 - Remove recursion checks for effects and computed signals
+- Nested effects in computed signals is treated as undefined behavior
 
 The [`alien-signals` Deep Dive](https://gist.github.com/johnsoncodehk/59e79a0cfa5bb3421b5d166a08e42f30) by Johnson Chu has been a big help!
 
