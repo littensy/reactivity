@@ -28,6 +28,7 @@ export type EffectNode = BaseSubscriber & BaseDependency & {
 	read callback: () -> ...(() -> ())?,
 	read cleanups: { () -> () },
 	queued: boolean,
+	hasChildEffect: boolean?,
 }
 
 export type EffectScopeNode = BaseSubscriber & BaseDependency & {
@@ -78,8 +79,6 @@ local function queueEffect(effect: EffectNode)
 	local startIndex = queueLength + 1
 	local nextEffect = effect
 
-	-- Queue this effect and its parent effects to ensure dirty/pending outer
-	-- effects can run before inner effects
 	repeat
 		nextEffect.queued = true
 		queueLength += 1
@@ -91,8 +90,8 @@ local function queueEffect(effect: EffectNode)
 
 	local endIndex = queueLength
 
-	-- Reverse the order of the newly queued effects to ensure outer effects
-	-- are checked before inner effects
+	-- Reverse the order of the newly queued effects to ensure parent effects
+	-- are checked before child effects
 	while startIndex < endIndex do
 		queue[startIndex], queue[endIndex] = queue[endIndex], queue[startIndex]
 		startIndex += 1
@@ -169,8 +168,6 @@ local function purgeStaleDeps(sub: Subscriber, lastStaleDep: number)
 	local subDeps = sub.deps
 	local staleDepCount = lastStaleDep - staleDepCursor + 1
 
-	-- Unlink from depSubs first to access stale dependencies before they are
-	-- removed from subDeps
 	for depIndex = staleDepCursor, lastStaleDep do
 		local dep = subDeps[depIndex]
 		if dep then
@@ -183,8 +180,7 @@ local function purgeStaleDeps(sub: Subscriber, lastStaleDep: number)
 	end
 
 	-- Optimize table removal by shifting the remaining dependencies in a
-	-- batch, instead of removing each dependency one by one, which would cause
-	-- shifting on every removal.
+	-- batch, instead of removing each dependency one by one
 	table.move(subDeps, lastStaleDep + 1, #subDeps + staleDepCount, staleDepCursor)
 end
 
@@ -192,29 +188,26 @@ end
 -- in a predictable order. Used when a subscriber is being disposed or when a
 -- computed node is freeing resources after losing all subscribers.
 local function clearDeps(sub: Subscriber)
-	local nextDep = sub.deps[1]
-	while nextDep do
-		unlink(nextDep, sub, 1)
-		nextDep = sub.deps[1]
+	local dep = sub.deps[1]
+	while dep do
+		unlink(dep, sub, 1)
+		dep = sub.deps[1]
 	end
 	sub.staleDepCursor = 1
 end
 
--- Unlinks inner effects from the subscriber while skipping non-effect
--- dependencies, so that effects can be cleaned up before non-effect
--- dependencies are purged. Used to ensure cleanups run before the effect runs.
-local function unlinkInnerEffects(sub: Subscriber)
+local function unlinkChildEffects(sub: Subscriber)
 	local deps = sub.deps
+	local dep = deps[1]
 	local index = 1
-	local nextDep = deps[index]
-	while nextDep do
-		if nextDep.type == EFFECT or nextDep.type == EFFECT_SCOPE then
-			unlink(nextDep, sub, index)
+	repeat
+		if dep.type == EFFECT or dep.type == EFFECT_SCOPE then
+			unlink(dep, sub, index)
 		else
 			index += 1
 		end
-		nextDep = deps[index]
-	end
+		dep = deps[index]
+	until not dep
 end
 
 local function runCleanups(cleanups: { () -> () })
@@ -337,10 +330,10 @@ end
 
 local function run(effect: EffectNode)
 	if effect.status == DIRTY or (effect.status == PENDING and checkDirty(effect)) then
-		-- Clean up inner effects before re-evaluating this effect, since
-		-- relying on purgeStaleDeps to clean up effects after re-running
-		-- might run cleanups in an unexpected order
-		unlinkInnerEffects(effect)
+		if effect.hasChildEffect then
+			unlinkChildEffects(effect)
+		end
+
 		runCleanups(effect.cleanups)
 
 		-- Cancel the run if the effect was stopped during cleanup
@@ -496,7 +489,6 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 			local prevSub = setActiveSub(node)
 			local success, result = pcall(node.getter, nil)
 			activeSub = prevSub
-
 			if success then
 				initialized = true
 				node.value = result
@@ -525,10 +517,12 @@ local function effect(callback: () -> ...(() -> ())?): () -> ()
 		cleanups = {},
 	}
 
-	-- Clean up the node when the parent subscriber updates or gets disposed by
-	-- linking to the parent subscriber, which allows the process of clearing
-	-- dependencies to also clean up inner effects.
+	-- Clean up the effect when the parent subscriber updates or gets disposed
+	-- by linking it as a dependency.
 	if activeSub then
+		if activeSub.type == EFFECT then
+			activeSub.hasChildEffect = true
+		end
 		link(node, activeSub)
 	end
 
@@ -564,10 +558,12 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 		cleanups = {},
 	}
 
-	-- Clean up the node when the parent subscriber updates or gets disposed by
-	-- linking to the parent subscriber, which allows the process of clearing
-	-- dependencies to also clean up inner effects.
+	-- Clean up the effect scope when the parent subscriber updates or gets
+	-- disposed by linking it as a dependency.
 	if activeSub and not detached then
+		if activeSub.type == EFFECT then
+			activeSub.hasChildEffect = true
+		end
 		link(node, activeSub)
 	end
 
