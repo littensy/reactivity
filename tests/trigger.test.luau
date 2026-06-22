@@ -73,4 +73,32 @@ test("should not notify the trigger function sub", function()
 	end)
 end)
 
+test("should allow writing a signal after reading it", function()
+	local src1 = signal(1)
+
+	trigger(function()
+		src1()
+		src1(src1() + 1)
+	end)
+	assert(src1() == 2, "src1 should be 2")
+end)
+
+test("should rerun effect once when writing a signal after reading it", function()
+	local src1 = signal(1)
+	local triggers = 0
+
+	effect(function()
+		triggers += 1
+		src1()
+	end)
+
+	assert(triggers == 1, "effect should run once initially")
+	trigger(function()
+		src1()
+		src1(src1() + 1)
+	end)
+	assert(triggers == 2, `effect should run once after trigger, but ran {triggers - 1} times`)
+	assert(src1() == 2, "src1 should be 2")
+end)
+
 return {}

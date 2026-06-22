@@ -594,6 +594,8 @@ local function trigger(callback: () -> ...any)
 		cleanups = {},
 	}
 
+	startBatch()
+
 	local prevSub = setActiveSub(sub)
 	local success, err = pcall(callback)
 	activeSub = prevSub
@@ -606,7 +608,7 @@ local function trigger(callback: () -> ...any)
 		dep = sub.deps[1]
 	end
 
-	flush()
+	endBatch()
 
 	if not success then
 		error(err, 2)
