@@ -147,10 +147,13 @@ end
 -- Unlinks a dependency from a subscriber. If the dependency has no more
 -- subscribers after unlinking, it will be unwatched to release its resources.
 local function unlink(dep: Dependency, sub: Subscriber, subDepIndex: number?)
-	table.remove(sub.deps, subDepIndex or table.find(sub.deps, dep) or 0)
-	table.remove(dep.subs, table.find(dep.subs, sub) or 0)
+	local subDeps = sub.deps
+	local depSubs = dep.subs
 
-	if not dep.subs[1] then
+	table.remove(subDeps, subDepIndex or table.find(subDeps, dep) or 0)
+	table.remove(depSubs, table.find(depSubs, sub) or 0)
+
+	if not depSubs[1] then
 		unwatched(dep)
 	end
 end
@@ -165,11 +168,12 @@ local function purgeStaleDeps(sub: Subscriber, lastStaleDep: number)
 		return
 	end
 
-	local subDeps = sub.deps
+	local deps = sub.deps
 	local staleDepCount = lastStaleDep - staleDepCursor + 1
 
-	for depIndex = staleDepCursor, lastStaleDep do
-		local dep = subDeps[depIndex]
+	-- Purge stale dependencies in reverse order to optimize table removals
+	for depIndex = lastStaleDep, staleDepCursor, -1 do
+		local dep = deps[depIndex]
 		if dep then
 			local depSubs = dep.subs
 			table.remove(depSubs, table.find(depSubs, sub) or 0)
@@ -181,17 +185,15 @@ local function purgeStaleDeps(sub: Subscriber, lastStaleDep: number)
 
 	-- Optimize table removal by shifting the remaining dependencies in a
 	-- batch, instead of removing each dependency one by one
-	table.move(subDeps, lastStaleDep + 1, #subDeps + staleDepCount, staleDepCursor)
+	table.move(deps, lastStaleDep + 1, #deps + staleDepCount, staleDepCursor)
 end
 
--- Removes all dependencies from the subscriber in order so that cleanups run
--- in a predictable order. Used when a subscriber is being disposed or when a
--- computed node is freeing resources after losing all subscribers.
-local function clearDeps(sub: Subscriber)
-	local dep = sub.deps[1]
+local function purgeDeps(sub: Subscriber)
+	local deps = sub.deps
+	local dep = deps[1]
 	while dep do
 		unlink(dep, sub, 1)
-		dep = sub.deps[1]
+		dep = deps[1]
 	end
 	sub.staleDepCursor = 1
 end
@@ -232,7 +234,7 @@ local function stopEffect(effect: EffectNode | EffectScopeNode)
 	end
 
 	-- Unlink from dependencies and child effects
-	clearDeps(effect)
+	purgeDeps(effect)
 
 	-- Unlink from the parent node
 	if effect.subs[1] then
@@ -251,7 +253,7 @@ function unwatched(node: Dependency)
 		-- Clearing a computed node's dependencies when it loses all of its
 		-- subscribers allows it to be garbage collected
 		node.status = DIRTY
-		clearDeps(node)
+		purgeDeps(node)
 	end
 end
 
