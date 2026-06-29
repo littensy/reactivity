@@ -133,13 +133,14 @@ end
 -- previous run, it will attempt to reuse the existing dependency.
 local function link(dep: Dependency, sub: Subscriber)
 	local staleDepCursor = sub.staleDepCursor
+	local subDeps = sub.deps
 
 	-- If the next stale dependency is the same as the new dependency, we can
 	-- skip linking and mark it as used.
-	if sub.deps[staleDepCursor] == dep then
+	if subDeps[staleDepCursor] == dep then
 		sub.staleDepCursor = staleDepCursor + 1
 	else
-		table.insert(sub.deps, dep)
+		table.insert(subDeps, dep)
 		table.insert(dep.subs, sub)
 	end
 end
@@ -428,12 +429,9 @@ local function signal<T>(initialValue: T): Signal<T>
 
 	return function(...: Update<T>): T
 		if select("#", ...) == 0 then
-			if node.status == DIRTY then
-				if updateSignal(node) then
-					shallowPropagateDirty(node)
-				end
+			if node.status == DIRTY and updateSignal(node) then
+				shallowPropagateDirty(node)
 			end
-
 			if activeSub then
 				link(node, activeSub)
 			end
@@ -444,6 +442,7 @@ local function signal<T>(initialValue: T): Signal<T>
 				local prevSub = setActiveSub(nil)
 				local success, result = pcall(value, node.pendingValue)
 				activeSub = prevSub
+
 				if success then
 					value = result
 				else
@@ -472,6 +471,7 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 		staleDepCursor = 1,
 		getter = getter,
 	}
+
 	local initialized = false
 
 	return function(): T
@@ -491,6 +491,7 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 			local prevSub = setActiveSub(node)
 			local success, result = pcall(node.getter, nil)
 			activeSub = prevSub
+
 			if success then
 				initialized = true
 				node.value = result
