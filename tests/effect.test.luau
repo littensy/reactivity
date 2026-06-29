@@ -93,65 +93,6 @@ test("should not trigger inner effect when resolve maybe dirty", function()
 	a(2)
 end)
 
-test("should notify inner effects in the same order as non-inner effects", function()
-	local a = signal(0)
-	local b = signal(0)
-	local c = computed(function()
-		return a() - b()
-	end)
-	local order1 = {}
-	local order2 = {}
-	local order3 = {}
-
-	effect(function()
-		table.insert(order1, "effect1")
-		a()
-	end)
-	effect(function()
-		table.insert(order1, "effect2")
-		a()
-		b()
-	end)
-
-	effect(function()
-		c()
-		effect(function()
-			table.insert(order2, "effect1")
-			a()
-		end)
-		effect(function()
-			table.insert(order2, "effect2")
-			a()
-			b()
-		end)
-	end)
-
-	effectScope(function()
-		effect(function()
-			table.insert(order3, "effect1")
-			a()
-		end)
-		effect(function()
-			table.insert(order3, "effect2")
-			a()
-			b()
-		end)
-	end)
-
-	table.clear(order1)
-	table.clear(order2)
-	table.clear(order3)
-
-	startBatch()
-	b(1)
-	a(1)
-	endBatch()
-
-	assert(table.concat(order1, ", ") == "effect2, effect1", "wrong order 1")
-	assert(table.concat(order2, ", ") == "effect2, effect1", "wrong order 2")
-	assert(table.concat(order3, ", ") == "effect2, effect1", "wrong order 3")
-end)
-
 test("should custom effect support batch", function()
 	local function batchEffect(fn: () -> ())
 		return effect(function()
@@ -190,60 +131,6 @@ test("should custom effect support batch", function()
 	end)
 
 	assert(table.concat(logs, ", ") == "bb, aa-0, aa-1, bb", `wrong order: {table.concat(logs, ", ")}`)
-end)
-
-test("should duplicate subscribers do not affect the notify order", function()
-	local src1 = signal(0)
-	local src2 = signal(0)
-	local order: { string } = {}
-
-	effect(function()
-		table.insert(order, "a")
-		local currentSub = setActiveSub(nil)
-		local isOne = src2() == 1
-		setActiveSub(currentSub)
-		if isOne then
-			src1()
-		end
-		src2()
-		src1()
-	end)
-	effect(function()
-		table.insert(order, "b")
-		src1()
-	end)
-	src2(1) -- src1.subs: a -> b -> a
-
-	table.clear(order)
-	src1(src1() + 1)
-
-	assert(table.concat(order) == "ab", `wrong order: {table.concat(order)}`)
-end)
-
-test("should handle side effect with inner effects", function()
-	local a = signal(0)
-	local b = signal(0)
-	local order: { string } = {}
-
-	effect(function()
-		effect(function()
-			a()
-			table.insert(order, "a")
-		end)
-		effect(function()
-			b()
-			table.insert(order, "b")
-		end)
-		assert(table.concat(order) == "ab", `wrong order: {table.concat(order)}`)
-
-		table.clear(order)
-		b(1)
-		a(1)
-	end)
-
-	-- DEVIATION: This assertion was moved outside of the effect so that it
-	-- runs after the batch updates have been processed
-	assert(table.concat(order) == "ba", `wrong order: {table.concat(order)}`)
 end)
 
 test("should handle flags are indirectly updated during checkDirty", function()
@@ -303,41 +190,12 @@ end)
 
 test("should allow finite recursion", function()
 	local src = signal(0)
-	local order = {}
-
+	local output = {}
 	effect(function()
-		table.insert(order, src())
+		table.insert(output, src())
 		src(math.min(src() + 1, 5))
 	end)
-	assert(table.concat(order) == "012345", `bad order: {table.concat(order)}`)
-end)
-
-test("should run cleanups in sequence", function()
-	local order = {}
-
-	local a = signal(false)
-	local stopEffect = effect(function()
-		a()
-		onCleanup(function()
-			table.insert(order, "a")
-		end)
-		onCleanup(function()
-			table.insert(order, "b")
-		end)
-	end)
-
-	assert(table.concat(order) == "", "should not cleanup immediately")
-
-	a(true)
-	assert(table.concat(order) == "ab", `bad update: {table.concat(order)}`)
-
-	table.clear(order)
-	stopEffect()
-	assert(table.concat(order) == "ab", `bad dispose: {table.concat(order)}`)
-
-	table.clear(order)
-	a(false)
-	assert(table.concat(order) == "", "should not cleanup after update")
+	assert(table.concat(output) == "012345", `bad output: {table.concat(output)}`)
 end)
 
 test("should run inner effect cleanup", function()
@@ -475,72 +333,306 @@ test("should reset the cleanup if the effect throws", function()
 	assert(calls == 1, "should not call cleanup again after resetting value")
 end)
 
-test("recursive effects should run and cleanup in order", function()
-	local a = signal(0)
-	local order: { string } = {}
+test.describe("FIFO ordering", function()
+	test("should notify inner effects in the same order as non-inner effects", function()
+		local a = signal(0)
+		local b = signal(0)
+		local c = computed(function()
+			return a() - b()
+		end)
+		local order1 = {}
+		local order2 = {}
+		local order3 = {}
 
-	effect(function()
-		local value = a()
-		table.insert(order, `+{value}`)
-		if value < 3 then
-			a(value + 1)
-		end
-		return function()
-			table.insert(order, `-{value}`)
-		end
+		effect(function()
+			table.insert(order1, "effect1")
+			a()
+		end)
+		effect(function()
+			table.insert(order1, "effect2")
+			a()
+			b()
+		end)
+
+		effect(function()
+			c()
+			effect(function()
+				table.insert(order2, "effect1")
+				a()
+			end)
+			effect(function()
+				table.insert(order2, "effect2")
+				a()
+				b()
+			end)
+		end)
+
+		effectScope(function()
+			effect(function()
+				table.insert(order3, "effect1")
+				a()
+			end)
+			effect(function()
+				table.insert(order3, "effect2")
+				a()
+				b()
+			end)
+		end)
+
+		table.clear(order1)
+		table.clear(order2)
+		table.clear(order3)
+
+		startBatch()
+		b(1)
+		a(1)
+		endBatch()
+
+		assert(table.concat(order1, ", ") == "effect2, effect1", "wrong order 1")
+		assert(table.concat(order2, ", ") == "effect2, effect1", "wrong order 2")
+		assert(table.concat(order3, ", ") == "effect2, effect1", "wrong order 3")
 	end)
-	assert(table.concat(order) == "+0-0+1-1+2-2+3", `bad order: {table.concat(order)}`)
 
-	table.clear(order)
-	a(100)
-	assert(table.concat(order) == "-3+100", `bad order: {table.concat(order)}`)
-end)
+	test("should duplicate subscribers do not affect the notify order", function()
+		local src1 = signal(0)
+		local src2 = signal(0)
+		local order: { string } = {}
 
-test("inner effects should dispose in order", function()
-	local src = signal(false)
-	local order: { number } = {}
+		effect(function()
+			table.insert(order, "a")
+			local currentSub = setActiveSub(nil)
+			local isOne = src2() == 1
+			setActiveSub(currentSub)
+			if isOne then
+				src1()
+			end
+			src2()
+			src1()
+		end)
+		effect(function()
+			table.insert(order, "b")
+			src1()
+		end)
+		src2(1) -- src1.subs: a -> b -> a
 
-	local dispose = effect(function()
-		src()
-		for i = 1, 3 do
+		table.clear(order)
+		src1(src1() + 1)
+
+		assert(table.concat(order) == "ab", `wrong order: {table.concat(order)}`)
+	end)
+
+	test("should handle side effect with inner effects", function()
+		local a = signal(0)
+		local b = signal(0)
+		local order: { string } = {}
+
+		effect(function()
+			effect(function()
+				a()
+				table.insert(order, "a")
+			end)
+			effect(function()
+				b()
+				table.insert(order, "b")
+			end)
+			assert(table.concat(order) == "ab", `wrong order: {table.concat(order)}`)
+
+			table.clear(order)
+			b(1)
+			a(1)
+		end)
+
+		-- DEVIATION: This assertion was moved outside of the effect so that it
+		-- runs after the batch updates have been processed
+		assert(table.concat(order) == "ba", `wrong order: {table.concat(order)}`)
+	end)
+
+	test("should run cleanups in sequence", function()
+		local order = {}
+
+		local a = signal(false)
+		local stopEffect = effect(function()
+			a()
+			onCleanup(function()
+				table.insert(order, "a")
+			end)
+			onCleanup(function()
+				table.insert(order, "b")
+			end)
+		end)
+
+		assert(table.concat(order) == "", "should not cleanup immediately")
+
+		a(true)
+		assert(table.concat(order) == "ab", `bad update: {table.concat(order)}`)
+
+		table.clear(order)
+		stopEffect()
+		assert(table.concat(order) == "ab", `bad dispose: {table.concat(order)}`)
+
+		table.clear(order)
+		a(false)
+		assert(table.concat(order) == "", "should not cleanup after update")
+	end)
+
+	test("recursive effects should run and cleanup in order", function()
+		local a = signal(0)
+		local order: { string } = {}
+
+		effect(function()
+			local value = a()
+			table.insert(order, `+{value}`)
+			if value < 3 then
+				a(value + 1)
+			end
+			return function()
+				table.insert(order, `-{value}`)
+			end
+		end)
+		assert(table.concat(order) == "+0-0+1-1+2-2+3", `bad order: {table.concat(order)}`)
+
+		table.clear(order)
+		a(100)
+		assert(table.concat(order) == "-3+100", `bad order: {table.concat(order)}`)
+	end)
+
+	test("inner effects should dispose in order", function()
+		local src = signal(false)
+		local log: { string } = {}
+
+		local dispose = effect(function()
+			src()
 			effect(function()
 				return function()
-					table.insert(order, i)
+					table.insert(log, "inner1:cleanup")
 				end
 			end)
-		end
-	end)
-
-	src(true)
-	assert(table.concat(order) == "123", `bad rerun order: {table.concat(order)}`)
-	dispose()
-	assert(table.concat(order) == "123123", `bad dispose order: {table.concat(order)}`)
-	src(false)
-	assert(table.concat(order) == "123123", "should not cleanup after dispose")
-end)
-
-test("inner effects should dispose before outer effect re-runs", function()
-	local src = signal(false)
-	local dispose: () -> ()
-	local order: { number } = {}
-
-	dispose = effect(function()
-		src()
-		table.insert(order, 0)
-		for i = 1, 4 do
 			effect(function()
 				return function()
-					table.insert(order, i)
+					table.insert(log, "inner2:cleanup")
+				end
+			end)
+			effect(function()
+				return function()
+					table.insert(log, "inner3:cleanup")
+				end
+			end)
+		end)
+
+		src(true)
+		assert(
+			table.concat(log, ", ") == "inner1:cleanup, inner2:cleanup, inner3:cleanup",
+			`bad update order: {table.concat(log, ", ")}`
+		)
+
+		table.clear(log)
+		dispose()
+		assert(
+			table.concat(log, ", ") == "inner1:cleanup, inner2:cleanup, inner3:cleanup",
+			`bad dispose order: {table.concat(log, ", ")}`
+		)
+
+		table.clear(log)
+		src(false)
+		assert(table.concat(log, ", ") == "", "should not cleanup after dispose")
+	end)
+
+	test("inner effects should dispose before outer effect re-runs", function()
+		local src = signal(false)
+		local dispose: () -> ()
+		local log: { string } = {}
+
+		dispose = effect(function()
+			src()
+			table.insert(log, "outer:run")
+			effect(function()
+				return function()
+					table.insert(log, "inner1:cleanup")
 					dispose()
 				end
 			end)
-		end
+			effect(function()
+				return function()
+					table.insert(log, "inner2:cleanup")
+					dispose()
+				end
+			end)
+			effect(function()
+				return function()
+					table.insert(log, "inner3:cleanup")
+					dispose()
+				end
+			end)
+		end)
+
+		src(true)
+		assert(
+			table.concat(log, ", ") == "outer:run, inner1:cleanup, inner2:cleanup, inner3:cleanup",
+			`bad rerun order: {table.concat(log, ", ")}`
+		)
+
+		table.clear(log)
+		src(false)
+		assert(table.concat(log, ", ") == "", "should not cleanup after dispose")
 	end)
 
-	src(true)
-	assert(table.concat(order) == "01234", `bad rerun order: {table.concat(order)}`)
-	src(false)
-	assert(table.concat(order) == "01234", "should not cleanup after dispose")
+	-- https://github.com/johnsoncodehk/reactive-framework-test-suite #241
+	test("three-level cleanup ordering: deepest first if cascaded", function()
+		local log: { string } = {}
+
+		local dispose = effect(function()
+			effect(function()
+				effect(function()
+					return function()
+						table.insert(log, "grandchild:cleanup")
+					end
+				end)
+				return function()
+					table.insert(log, "child:cleanup")
+				end
+			end)
+			return function()
+				table.insert(log, "outer:cleanup")
+			end
+		end)
+
+		dispose()
+		assert(
+			table.concat(log, ", ") == "grandchild:cleanup, child:cleanup, outer:cleanup",
+			`bad cleanup order: {table.concat(log, ", ")}`
+		)
+	end)
+
+	-- https://github.com/johnsoncodehk/reactive-framework-test-suite #243
+	test("cleanup ordering correct after prior inner-only re-run", function()
+		local a = signal(0)
+		local b = signal(0)
+		local log: { string } = {}
+
+		effect(function()
+			a()
+			table.insert(log, "outer:run")
+			effect(function()
+				b()
+				table.insert(log, "inner:run")
+				return function()
+					table.insert(log, "inner:cleanup")
+				end
+			end)
+			return function()
+				table.insert(log, "outer:cleanup")
+			end
+		end)
+
+		b(1) -- inner re-runs alone
+		table.clear(log)
+
+		a(1)
+		assert(
+			table.concat(log, ", ") == "inner:cleanup, outer:cleanup, outer:run, inner:run",
+			`bad cleanup order after inner-only re-run: {table.concat(log, ", ")}`
+		)
+	end)
 end)
 
 -- https://github.com/stackblitz/alien-signals/pull/110
@@ -837,13 +929,7 @@ test.describe("checkDirty graph mutation", function()
 end)
 
 test.describe("parent-child link integrity", function()
-	-- S(a) ─→ E_outer{ E_inner ─→ S(b) }
-	--
-	-- Outer reads a and creates an inner effect that reads b.
-	-- After b changes (which re-runs only the inner), the outer
-	-- must still respond to subsequent writes to its own dep a.
-	--
-	-- See https://github.com/stackblitz/alien-signals/issues/115
+	-- https://github.com/stackblitz/alien-signals/issues/115
 	test("outer keeps responding to own deps after inner re-runs", function()
 		local a = signal(0)
 		local b = signal(0)
@@ -871,13 +957,6 @@ test.describe("parent-child link integrity", function()
 		assert(outerRuns == 2, "outer should have re-run after a update")
 	end)
 
-	-- S(a) ─→ E_outer{ E_inner1 ─→ S(b1),  E_inner2 ─→ S(b2) }
-	--
-	-- Outer creates two sibling inner effects. After only one of them
-	-- re-runs (via its own dep), the outer must still respond to a.
-	-- Same parent-child link integrity property as above, but with
-	-- sibling inners — could expose bugs where one inner's re-run
-	-- corrupts the other or the parent's link.
 	test("outer responds after one of multiple sibling inners re-runs", function()
 		local a = signal(0)
 		local b1 = signal(0)
@@ -912,12 +991,6 @@ test.describe("parent-child link integrity", function()
 		assert(outerRuns == 2, "outer should have re-run after a update")
 	end)
 
-	-- S(a) ─→ E_outer{ E_inner ─→ S(b) }
-	-- b.write × 3
-	--
-	-- Inner re-runs multiple times via successive writes to b. After
-	-- the burst, the outer must still respond to a. Verifies the
-	-- parent-child link survives repeated inner re-runs, not just one.
 	test("outer responds after inner re-runs multiple times", function()
 		local a = signal(0)
 		local b = signal(0)
