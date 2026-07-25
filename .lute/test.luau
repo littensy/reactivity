@@ -1,4 +1,7 @@
+local reactivity = require("../src")
 local test = require("../tests/test")
+
+reactivity.flags.strict = true
 
 test.describe("computed", function()
 	require("../tests/computed.test")
@@ -10,6 +13,10 @@ end)
 
 test.describe("effectScope", function()
 	require("../tests/effectScope.test")
+end)
+
+test.describe("errors", function()
+	require("../tests/errors.test")
 end)
 
 test.describe("gc", function()

@@ -53,13 +53,64 @@ export type ReactiveNode = SignalNode | ComputedNode | EffectNode | EffectScopeN
 export type Update<T> = ((current: T) -> T) | T
 export type Signal<T> = (...Update<T>) -> T
 
+local flags = {
+	-- Enforces synchronous, non-yielding behavior in signals and effects.
+	-- Also enables state validation in Charm Sync to catch sync errors early.
+	-- Enabled by default in Roblox Studio.
+	strict = false,
+	-- Enforces immutability of tables by deep-freezing table values. Enabled
+	-- by default in Roblox Studio.
+	frozen = false,
+}
+
 local queue: { EffectNode } = {}
 local queueLength = 0
 local notifyIndex = 0
 local batchDepth = 0
 local activeSub: Subscriber?
 
+-- Hoisted so unwatched() and unlink() can depend on each other
 local unwatched: (sub: Subscriber) -> ()
+
+-- Wraps a user-created function to prevent yielding when in strict mode.
+local function noYield<Args..., Results...>(callback: (Args...) -> Results...): (Args...) -> Results...
+	-- If the debug sources match, the function was created in this module, and
+	-- can be expected to not yield. Also simplifies internal stack traces.
+	if not flags.strict or debug.info(1, "s") == debug.info(callback, "s") then
+		return callback
+	end
+
+	local handler = function(thread: thread, ok: boolean, ...: Results...): Results...
+		if coroutine.status(thread) == "suspended" then
+			error(debug.traceback(thread, "Attempted to yield in an effect or scope"), 0)
+		elseif ok then
+			return ...
+		else
+			local err = (...)
+			if type(err) == "string" then
+				error(debug.traceback(thread, err), 0)
+			else
+				error(tostring(err), 0)
+			end
+		end
+	end
+
+	return function(...: Args...): Results...
+		local thread = coroutine.create(callback)
+		return handler(thread, coroutine.resume(thread, ...))
+	end
+end
+
+-- Recursively freezes a table and all nested tables to enforce immutability.
+-- Tables with metatables are skipped, as they are assumed to be mutable.
+local function deepFreeze(value: any)
+	if type(value) == "table" and not table.isfrozen(value) and getmetatable(value) == nil then
+		table.freeze(value)
+		for _, entry in value do
+			deepFreeze(entry)
+		end
+	end
+end
 
 local function getActiveSub(): Subscriber?
 	return activeSub
@@ -99,8 +150,9 @@ local function queueEffect(effect: EffectNode)
 	end
 end
 
--- Marks immediate subscribers as dirty without checking their dependencies.
--- Used when a node is updated to cause all of its subscribers to be updated.
+-- Marks immediate subscribers as dirty and queues effects. Used when a node
+-- has a valid update to propagate, so pending subscribers should be marked as
+-- dirty, or having an updated dependency.
 local function shallowPropagateDirty(dep: Dependency)
 	for _, sub in dep.subs do
 		if sub.status == PENDING then
@@ -112,9 +164,12 @@ local function shallowPropagateDirty(dep: Dependency)
 	end
 end
 
--- Marks nested subscribers as pending and queue effect runs. Used when a node
--- receives an update but has not been accessed yet, so it may not be known if
--- the update will cause a change.
+-- Marks all subscribers as pending and queues effects. Used when a root node
+-- initiates an update that notifies multiple levels of subscribers that they
+-- might have become dirty.
+--
+-- While effects immediately check for updates on the next flush, computed
+-- nodes update lazily, so they are instead recursively marked as pending.
 local function propagatePending(dep: Dependency)
 	for _, sub in dep.subs do
 		if sub.status == CLEAN then
@@ -214,6 +269,9 @@ local function unlinkChildEffects(sub: Subscriber)
 end
 
 local function runCleanups(cleanups: { () -> () })
+	local failed = false
+	local errors: { string } = {}
+
 	for index, cleanup in cleanups do
 		cleanups[index] = nil
 
@@ -222,8 +280,13 @@ local function runCleanups(cleanups: { () -> () })
 		activeSub = prevSub
 
 		if not success then
-			error(err, 0)
+			failed = true
+			table.insert(errors, tostring(err))
 		end
+	end
+
+	if failed then
+		error(`Errors occurred during effect cleanup:\n\n{table.concat(errors, "\n\n")}`, 0)
 	end
 end
 
@@ -357,7 +420,7 @@ local function run(effect: EffectNode)
 		purgeStaleDeps(effect, lastStaleDep)
 
 		if success and type(cleanup) == "function" then
-			table.insert(effect.cleanups, cleanup)
+			table.insert(effect.cleanups, noYield(cleanup))
 		elseif not success then
 			error(cleanup, 0)
 		end
@@ -427,6 +490,10 @@ local function signal<T>(initialValue: T): Signal<T>
 		pendingValue = initialValue,
 	}
 
+	if flags.frozen then
+		deepFreeze(initialValue)
+	end
+
 	return function(...: Update<T>): T
 		if select("#", ...) == 0 then
 			if node.status == DIRTY and updateSignal(node) then
@@ -440,7 +507,7 @@ local function signal<T>(initialValue: T): Signal<T>
 
 			if type(value) == "function" then
 				local prevSub = setActiveSub(nil)
-				local success, result = pcall(value, node.pendingValue)
+				local success, result = pcall(noYield(value), node.pendingValue)
 				activeSub = prevSub
 
 				if success then
@@ -451,8 +518,13 @@ local function signal<T>(initialValue: T): Signal<T>
 			end
 
 			if node.pendingValue ~= value then
+				if flags.frozen then
+					deepFreeze(value)
+				end
+
 				node.pendingValue = value
 				node.status = DIRTY
+
 				propagatePending(node)
 				flush()
 			end
@@ -469,7 +541,7 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 		deps = {},
 		subs = {},
 		staleDepCursor = 1,
-		getter = getter,
+		getter = noYield(getter),
 	}
 
 	local initialized = false
@@ -515,7 +587,7 @@ local function effect(callback: () -> ...(() -> ())?): () -> ()
 		deps = {},
 		subs = {},
 		staleDepCursor = 1,
-		callback = callback,
+		callback = noYield(callback),
 		queued = false,
 		cleanups = {},
 	}
@@ -538,7 +610,7 @@ local function effect(callback: () -> ...(() -> ())?): () -> ()
 	activeSub = prevSub
 
 	if success and type(result) == "function" then
-		table.insert(node.cleanups, result)
+		table.insert(node.cleanups, noYield(result))
 	elseif not success then
 		endBatch()
 		error(result, 2)
@@ -571,7 +643,7 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 	end
 
 	local prevSub = setActiveSub(node)
-	local success, result = pcall(callback)
+	local success, result = pcall(noYield(callback))
 	activeSub = prevSub
 
 	if success and type(result) == "function" then
@@ -586,21 +658,19 @@ local function effectScope(callback: () -> ...(() -> ())?, detached: boolean?): 
 end
 
 local function trigger(callback: () -> ...any)
-	local sub: EffectNode = {
-		type = EFFECT,
+	local sub: EffectScopeNode = {
+		type = EFFECT_SCOPE,
 		status = DISPOSED,
 		deps = {},
 		subs = {},
 		staleDepCursor = 1,
-		callback = function() end,
-		queued = false,
 		cleanups = {},
 	}
 
 	startBatch()
 
 	local prevSub = setActiveSub(sub)
-	local success, err = pcall(callback)
+	local success, err = pcall(noYield(callback))
 	activeSub = prevSub
 
 	local dep = sub.deps[1]
@@ -621,7 +691,7 @@ end
 local function untracked<Args..., Results...>(callback: (Args...) -> Results..., ...: Args...): Results...
 	if activeSub then
 		local prevSub = setActiveSub(nil)
-		local results: { any } = { pcall(callback, ...) }
+		local results: { any } = { pcall(noYield(callback), ...) }
 		activeSub = prevSub
 
 		if not results[1] then
@@ -634,13 +704,26 @@ local function untracked<Args..., Results...>(callback: (Args...) -> Results...,
 	end
 end
 
+local function batch<Args..., Results...>(fn: (Args...) -> Results..., ...: Args...): Results...
+	startBatch()
+	local results: { any } = { pcall(noYield(fn), ...) }
+	endBatch()
+
+	if not results[1] then
+		error(results[2], 2)
+	end
+
+	return unpack(results, 2)
+end
+
 local function onCleanup(callback: () -> ())
 	if activeSub and (activeSub.type == EFFECT or activeSub.type == EFFECT_SCOPE) then
-		table.insert(activeSub.cleanups, callback)
+		table.insert(activeSub.cleanups, noYield(callback))
 	end
 end
 
 return table.freeze({
+	flags = flags,
 	getActiveSub = getActiveSub,
 	setActiveSub = setActiveSub,
 	startBatch = startBatch,
@@ -651,5 +734,6 @@ return table.freeze({
 	effectScope = effectScope,
 	trigger = trigger,
 	untracked = untracked,
+	batch = batch,
 	onCleanup = onCleanup,
 })
