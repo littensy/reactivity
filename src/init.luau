@@ -522,7 +522,7 @@ local function signal<T>(initialValue: T): Signal<T>
 					deepFreeze(value)
 				end
 
-				node.pendingValue = value
+				node.pendingValue = value :: T
 				node.status = DIRTY
 
 				propagatePending(node)
@@ -576,7 +576,7 @@ local function computed<T>(getter: (previousValue: T?) -> T): () -> T
 			link(node, activeSub)
 		end
 
-		return node.value
+		return node.value :: T
 	end
 end
 
